@@ -108,7 +108,7 @@ Stockage local (fichier data), clé = **compte** SASL si connecté, sinon nick. 
 
 ## Installation
 
-1. Copier le dossier `m_ircv3_metadata/` dans `src/modules/` de ton arbre InspIRCd 4.
+1. Copier `m_ircv3_metadata.cpp` dans `src/modules/` de ton arbre InspIRCd 4.
 2. Recompiler (`make`).
 3. Charger **après** `cap` (et `account` / `ircv3_batch` / `monitor` recommandés) :
 
