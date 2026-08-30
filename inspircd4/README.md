@@ -162,6 +162,62 @@ METADATA Alice GET avatar bio pronouns timezone url
 
 ---
 
+# m_ircv3_chathistory
+
+Module extra pour [draft/chathistory](https://ircv3.net/specs/extensions/chathistory) : commande `CHATHISTORY` (`LATEST` / `BEFORE` / `AFTER` / `AROUND` / `BETWEEN`).
+
+Compatible avec **Orbit** :
+- `CHATHISTORY LATEST #chan * 50` au JOIN
+- `CHATHISTORY BEFORE #chan timestamp=… 50` au scroll
+- réponses dans un **batch** type `chathistory` (nécessite `ircv3_batch`) avec tags `time` / `msgid`
+
+Ce n’est **pas** le mode `+H` (`m_chanhistory`). Les deux peuvent coexister ; Orbit déduplique. La spec recommande de ne pas rejouer l’historique auto si le client a `draft/chathistory` — le `+H` officiel le fait encore.
+
+Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels). Pas de `draft/event-playback` ni `TARGETS` pour l’instant.
+
+## Installation
+
+1. Copier `m_ircv3_chathistory.cpp` dans `src/modules/`.
+2. Recompiler (`make`).
+3. Charger **après** `cap`, `ircv3_batch`, `ircv3_servertime` (et `ircv3_msgid` recommandé) :
+
+```xml
+<module name="cap">
+<module name="ircv3">
+<module name="ircv3_batch">
+<module name="ircv3_servertime">
+<module name="ircv3_msgid">
+<module name="ircv3_chathistory">
+
+<ircv3chathistory
+    maxlines="500"
+    maxduration="7d"
+    maxquery="50"
+    savepms="yes"
+    savebots="yes">
+```
+
+## Configuration
+
+| Attribut | Défaut | Effet |
+|---|---|---|
+| `maxlines` | 500 | Messages gardés par canal / conversation MP |
+| `maxduration` | 7d | Âge max des messages stockés |
+| `maxquery` | 50 | Plafond `limit` (ISUPPORT `CHATHISTORY`) |
+| `savepms` | yes | Historique des messages privés |
+| `savebots` | yes | Enregistrer les messages des umode `+B` |
+
+ISUPPORT : `CHATHISTORY=<maxquery>`, `MSGREFTYPES=timestamp,msgid`.
+
+## Dépendances
+
+- `cap`
+- `ircv3_batch` (**obligatoire** pour Orbit)
+- `ircv3_servertime` (tag `time`)
+- `ircv3_msgid` recommandé (tag `msgid` pour dédup / react)
+
+---
+
 # m_ircv3_webpush
 
 Module extra pour l’extension IRCv3 [Web Push](https://github.com/ircv3/ircv3-specifications/pull/471) (vendored `soju.im/webpush`, aussi annoncé comme `draft/webpush`). Compatible avec les clients type Goguma.
