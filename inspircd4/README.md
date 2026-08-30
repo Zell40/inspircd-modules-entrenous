@@ -164,16 +164,17 @@ METADATA Alice GET avatar bio pronouns timezone url
 
 # m_ircv3_chathistory
 
-Module extra pour [draft/chathistory](https://ircv3.net/specs/extensions/chathistory) : commande `CHATHISTORY` (`LATEST` / `BEFORE` / `AFTER` / `AROUND` / `BETWEEN`).
+Module extra pour [draft/chathistory](https://ircv3.net/specs/extensions/chathistory) : commande `CHATHISTORY` (`LATEST` / `BEFORE` / `AFTER` / `AROUND` / `BETWEEN`), plus la cap **`draft/event-playback`** (JOIN/PART/QUIT/KICK/NICK/TOPIC/MODE dans le batch).
 
 Compatible avec **Orbit** :
 - `CHATHISTORY LATEST #chan * 50` au JOIN
 - `CHATHISTORY BEFORE #chan timestamp=… 50` au scroll
 - réponses dans un **batch** type `chathistory` (nécessite `ircv3_batch`) avec tags `time` / `msgid`
+- événements historiques si Orbit a négocié `draft/event-playback`
 
 Ce n’est **pas** le mode `+H` (`m_chanhistory`). Les deux peuvent coexister ; Orbit déduplique. La spec recommande de ne pas rejouer l’historique auto si le client a `draft/chathistory` — le `+H` officiel le fait encore.
 
-Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels). Pas de `draft/event-playback` ni `TARGETS` pour l’instant.
+Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels). Pas de `TARGETS` pour l’instant.
 
 ## Installation
 
@@ -194,20 +195,24 @@ Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels
     maxduration="7d"
     maxquery="50"
     savepms="yes"
-    savebots="yes">
+    savebots="yes"
+    saveevents="yes">
 ```
 
 ## Configuration
 
 | Attribut | Défaut | Effet |
 |---|---|---|
-| `maxlines` | 500 | Messages gardés par canal / conversation MP |
-| `maxduration` | 7d | Âge max des messages stockés |
+| `maxlines` | 500 | Messages/événements gardés par canal / conversation MP |
+| `maxduration` | 7d | Âge max des entrées stockées |
 | `maxquery` | 50 | Plafond `limit` (ISUPPORT `CHATHISTORY`) |
 | `savepms` | yes | Historique des messages privés |
 | `savebots` | yes | Enregistrer les messages des umode `+B` |
+| `saveevents` | yes | Stocker JOIN/PART/… pour `draft/event-playback` |
 
 ISUPPORT : `CHATHISTORY=<maxquery>`, `MSGREFTYPES=timestamp,msgid`.
+
+Sans `draft/event-playback` négocié, le batch ne contient que PRIVMSG/NOTICE (spec).
 
 ## Dépendances
 
@@ -215,6 +220,44 @@ ISUPPORT : `CHATHISTORY=<maxquery>`, `MSGREFTYPES=timestamp,msgid`.
 - `ircv3_batch` (**obligatoire** pour Orbit)
 - `ircv3_servertime` (tag `time`)
 - `ircv3_msgid` recommandé (tag `msgid` pour dédup / react)
+
+---
+
+# m_ircv3_read_marker
+
+Module extra pour [draft/read-marker](https://ircv3.net/specs/extensions/read-marker) : commande `MARKREAD`, sync du « déjà lu » entre sessions du même compte.
+
+Compatible avec **Orbit** (`MARKREAD #chan timestamp=<ISO>`).
+
+- Au JOIN d’un canal : envoie le marqueur courant (`timestamp=…` ou `*`)
+- Au SET : n’accepte que des timestamps **plus récents** ; diffuse aux autres clients locaux du même compte
+- GET : `MARKREAD <target>` sans timestamp
+
+## Installation
+
+```xml
+<module name="cap">
+<module name="account">
+<module name="ircv3_read_marker">
+
+<ircv3readmarker
+    requireaccount="yes"
+    persistfile="ircv3-readmarker.db"
+    saveperiod="30s">
+```
+
+## Configuration
+
+| Attribut | Défaut | Effet |
+|---|---|---|
+| `requireaccount` | yes | Exiger un login pour SET |
+| `persistfile` | `ircv3-readmarker.db` | Persistance disque |
+| `saveperiod` | 30s | Fréquence d’écriture |
+
+## Dépendances
+
+- `cap`
+- `account` si `requireaccount="yes"`
 
 ---
 

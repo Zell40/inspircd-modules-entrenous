@@ -20,8 +20,8 @@
  */
 
 /// $ModAuthor: Entre Nous IRCv3 port
-/// $ModConfig: <ircv3chathistory maxlines="500" maxduration="7d" maxquery="50" savepms="yes" savebots="yes">
-/// $ModDesc: Provides the IRCv3 draft/chathistory capability (CHATHISTORY).
+/// $ModConfig: <ircv3chathistory maxlines="500" maxduration="7d" maxquery="50" savepms="yes" savebots="yes" saveevents="yes">
+/// $ModDesc: Provides IRCv3 draft/chathistory and draft/event-playback (CHATHISTORY).
 /// $ModDepends: core 4
 
 #include "inspircd.h"
@@ -43,11 +43,14 @@ struct HistoryItem final
 {
 	time_t ts = 0;
 	long ms = 0;
+	bool is_event = false;
 	std::string text;
 	MessageType type = MessageType::PRIVMSG;
 	HistoryTagMap tags;
 	std::string sourcemask;
 	std::string msgid;
+	std::string command; // event verb: JOIN, PART, …
+	std::vector<std::string> eparams;
 
 	HistoryItem() = default;
 
@@ -64,6 +67,28 @@ struct HistoryItem final
 			if (irc::equals(tagname, "msgid"))
 				msgid = tagvalue.value;
 		}
+	}
+
+	static HistoryItem Event(User* source, const std::string& cmd, std::vector<std::string> params)
+	{
+		HistoryItem item;
+		item.is_event = true;
+		item.ts = ServerInstance->Time();
+		item.sourcemask = source->GetMask();
+		item.command = cmd;
+		item.eparams = std::move(params);
+		return item;
+	}
+
+	static HistoryItem EventMask(const std::string& mask, const std::string& cmd, std::vector<std::string> params)
+	{
+		HistoryItem item;
+		item.is_event = true;
+		item.ts = ServerInstance->Time();
+		item.sourcemask = mask;
+		item.command = cmd;
+		item.eparams = std::move(params);
+		return item;
 	}
 
 	bool EarlierThan(time_t ots, long oms) const
@@ -86,7 +111,7 @@ struct HistoryList final
 	std::deque<HistoryItem> lines;
 };
 
-class ChatHistoryCap final
+class DraftCap final
 	: public Cap::Capability
 {
 	bool OnList(LocalUser* user) override
@@ -100,8 +125,8 @@ class ChatHistoryCap final
 	}
 
 public:
-	ChatHistoryCap(Module* mod)
-		: Cap::Capability(mod, "draft/chathistory")
+	DraftCap(Module* mod, const std::string& capname)
+		: Cap::Capability(mod, capname)
 	{
 	}
 };
@@ -180,7 +205,8 @@ class ModuleIRCv3ChatHistory final
 	, public ISupport::EventListener
 {
 public:
-	ChatHistoryCap cap;
+	DraftCap cap;
+	DraftCap eventcap;
 	IRCv3::Replies::Fail fail;
 	IRCv3::Batch::API batchmanager;
 	IRCv3::Batch::CapReference batchcap;
@@ -190,7 +216,7 @@ public:
 	SimpleExtItem<HistoryList> chanhist;
 	UserModeReference botmode;
 
-	// PM history: key = lower(sorted nickA\0nickB) using account or nick
+	// PM history: key = lower(sorted nickA\0nickB)
 	std::map<std::string, HistoryList> pmhist;
 
 	size_t maxlines = 500;
@@ -198,11 +224,13 @@ public:
 	size_t maxquery = 50;
 	bool savepms = true;
 	bool savebots = true;
+	bool saveevents = true;
 
 	ModuleIRCv3ChatHistory()
-		: Module(VF_NONE, "Provides the IRCv3 draft/chathistory capability.")
+		: Module(VF_NONE, "Provides the IRCv3 draft/chathistory and draft/event-playback capabilities.")
 		, ISupport::EventListener(this)
-		, cap(this)
+		, cap(this, "draft/chathistory")
+		, eventcap(this, "draft/event-playback")
 		, fail(this)
 		, batchmanager(this)
 		, batchcap(this)
@@ -222,6 +250,7 @@ public:
 		maxquery = tag->getNum<size_t>("maxquery", 50, 1, 500);
 		savepms = tag->getBool("savepms", true);
 		savebots = tag->getBool("savebots", true);
+		saveevents = tag->getBool("saveevents", true);
 	}
 
 	void OnBuildISupport(ISupport::TokenMap& tokens) override
@@ -287,6 +316,35 @@ public:
 		}
 	}
 
+	void StoreEvent(Channel* chan, HistoryItem item)
+	{
+		if (!saveevents || !chan)
+			return;
+		HistoryList* list = GetChannelHistory(chan, true);
+		list->lines.push_back(std::move(item));
+		Prune(*list);
+	}
+
+	ClientProtocol::EventProvider& EventProvFor(const std::string& cmd)
+	{
+		auto& ev = ServerInstance->GetRFCEvents();
+		if (cmd == "JOIN")
+			return ev.join;
+		if (cmd == "PART")
+			return ev.part;
+		if (cmd == "KICK")
+			return ev.kick;
+		if (cmd == "QUIT")
+			return ev.quit;
+		if (cmd == "NICK")
+			return ev.nick;
+		if (cmd == "MODE")
+			return ev.mode;
+		if (cmd == "TOPIC")
+			return ev.topic;
+		return ev.privmsg;
+	}
+
 	void SendBatch(LocalUser* user, const std::string& targetname,
 		const std::vector<const HistoryItem*>& items)
 	{
@@ -299,6 +357,19 @@ public:
 
 		for (const HistoryItem* item : items)
 		{
+			if (item->is_event)
+			{
+				ClientProtocol::Message out(item->command.c_str(), item->sourcemask);
+				for (const auto& p : item->eparams)
+					out.PushParam(p);
+				if (servertimemanager)
+					servertimemanager->Set(out, item->ts, item->ms);
+				if (batch.IsRunning())
+					batch.AddToBatch(out);
+				user->Send(EventProvFor(item->command), out);
+				continue;
+			}
+
 			ClientProtocol::Messages::Privmsg out(
 				ClientProtocol::Messages::Privmsg::nocopy,
 				item->sourcemask,
@@ -337,10 +408,12 @@ public:
 	}
 
 	void CollectLatest(const HistoryList& list, size_t limit, time_t after_ts, long after_ms,
-		bool have_after, std::vector<const HistoryItem*>& out)
+		bool have_after, bool want_events, std::vector<const HistoryItem*>& out)
 	{
 		for (auto it = list.lines.rbegin(); it != list.lines.rend() && out.size() < limit; ++it)
 		{
+			if (it->is_event && !want_events)
+				continue;
 			if (have_after && !it->LaterThan(after_ts, after_ms))
 				continue;
 			out.push_back(&(*it));
@@ -349,10 +422,12 @@ public:
 	}
 
 	void CollectBefore(const HistoryList& list, size_t limit, time_t before_ts, long before_ms,
-		std::vector<const HistoryItem*>& out)
+		bool want_events, std::vector<const HistoryItem*>& out)
 	{
 		for (auto it = list.lines.rbegin(); it != list.lines.rend() && out.size() < limit; ++it)
 		{
+			if (it->is_event && !want_events)
+				continue;
 			if (!it->EarlierThan(before_ts, before_ms))
 				continue;
 			out.push_back(&(*it));
@@ -361,10 +436,12 @@ public:
 	}
 
 	void CollectAfter(const HistoryList& list, size_t limit, time_t after_ts, long after_ms,
-		std::vector<const HistoryItem*>& out)
+		bool want_events, std::vector<const HistoryItem*>& out)
 	{
 		for (const auto& item : list.lines)
 		{
+			if (item.is_event && !want_events)
+				continue;
 			if (!item.LaterThan(after_ts, after_ms))
 				continue;
 			out.push_back(&item);
@@ -428,13 +505,14 @@ public:
 		}
 
 		std::vector<const HistoryItem*> items;
+		const bool want_events = eventcap.IsEnabled(user);
 
 		if (sub == "LATEST")
 		{
 			if (star1)
-				CollectLatest(*list, limit, 0, 0, false, items);
+				CollectLatest(*list, limit, 0, 0, false, want_events, items);
 			else if (ts1)
-				CollectLatest(*list, limit, t1, m1, true, items);
+				CollectLatest(*list, limit, t1, m1, true, want_events, items);
 			else
 			{
 				size_t idx = 0;
@@ -443,7 +521,7 @@ public:
 					SendBatch(user, display, items);
 					return CmdResult::SUCCESS;
 				}
-				CollectLatest(*list, limit, list->lines[idx].ts, list->lines[idx].ms, true, items);
+				CollectLatest(*list, limit, list->lines[idx].ts, list->lines[idx].ms, true, want_events, items);
 			}
 		}
 		else if (sub == "BEFORE")
@@ -454,7 +532,7 @@ public:
 				return CmdResult::FAILURE;
 			}
 			if (ts1)
-				CollectBefore(*list, limit, t1, m1, items);
+				CollectBefore(*list, limit, t1, m1, want_events, items);
 			else
 			{
 				size_t idx = 0;
@@ -463,7 +541,7 @@ public:
 					SendBatch(user, display, items);
 					return CmdResult::SUCCESS;
 				}
-				CollectBefore(*list, limit, list->lines[idx].ts, list->lines[idx].ms, items);
+				CollectBefore(*list, limit, list->lines[idx].ts, list->lines[idx].ms, want_events, items);
 			}
 		}
 		else if (sub == "AFTER")
@@ -474,7 +552,7 @@ public:
 				return CmdResult::FAILURE;
 			}
 			if (ts1)
-				CollectAfter(*list, limit, t1, m1, items);
+				CollectAfter(*list, limit, t1, m1, want_events, items);
 			else
 			{
 				size_t idx = 0;
@@ -483,7 +561,7 @@ public:
 					SendBatch(user, display, items);
 					return CmdResult::SUCCESS;
 				}
-				CollectAfter(*list, limit, list->lines[idx].ts, list->lines[idx].ms, items);
+				CollectAfter(*list, limit, list->lines[idx].ts, list->lines[idx].ms, want_events, items);
 			}
 		}
 		else if (sub == "AROUND")
@@ -510,12 +588,13 @@ public:
 			const size_t after_n = limit - before_n;
 			std::vector<const HistoryItem*> before;
 			std::vector<const HistoryItem*> after;
-			CollectBefore(*list, before_n, cts, cms, before);
-			CollectAfter(*list, after_n, cts, cms, after);
+			CollectBefore(*list, before_n, cts, cms, want_events, before);
+			CollectAfter(*list, after_n, cts, cms, want_events, after);
 			items = before;
-			// include pivot if present
 			for (const auto& item : list->lines)
 			{
+				if (item.is_event && !want_events)
+					continue;
 				if (item.ts == cts && item.ms == cms)
 				{
 					items.push_back(&item);
@@ -564,6 +643,8 @@ public:
 			{
 				for (const auto& item : list->lines)
 				{
+					if (item.is_event && !want_events)
+						continue;
 					if (!item.LaterThan(t1, m1))
 						continue;
 					if (!item.EarlierThan(t2, m2))
@@ -577,6 +658,8 @@ public:
 			{
 				for (auto it = list->lines.rbegin(); it != list->lines.rend() && items.size() < limit; ++it)
 				{
+					if (it->is_event && !want_events)
+						continue;
 					if (!it->EarlierThan(t1, m1))
 						continue;
 					if (!it->LaterThan(t2, m2))
@@ -627,6 +710,78 @@ public:
 			list.lines.emplace_back(user, details);
 			Prune(list);
 		}
+	}
+
+	void OnPostJoin(Membership* memb) override
+	{
+		StoreEvent(memb->chan, HistoryItem::Event(memb->user, "JOIN", { memb->chan->name }));
+	}
+
+	void OnUserPart(Membership* memb, std::string& partmessage, CUList& except_list) override
+	{
+		std::vector<std::string> params = { memb->chan->name };
+		if (!partmessage.empty())
+			params.push_back(partmessage);
+		StoreEvent(memb->chan, HistoryItem::Event(memb->user, "PART", std::move(params)));
+	}
+
+	void OnUserKick(User* source, Membership* memb, const std::string& reason, CUList& except_list) override
+	{
+		std::vector<std::string> params = { memb->chan->name, memb->user->nick };
+		if (!reason.empty())
+			params.push_back(reason);
+		StoreEvent(memb->chan, HistoryItem::Event(source, "KICK", std::move(params)));
+	}
+
+	void OnUserQuit(User* user, const std::string& message, const std::string& oper_message) override
+	{
+		std::vector<std::string> params;
+		if (!message.empty())
+			params.push_back(message);
+		for (const Membership* memb : user->chans)
+			StoreEvent(memb->chan, HistoryItem::Event(user, "QUIT", params));
+	}
+
+	void OnUserPostNick(User* user, const std::string& oldnick) override
+	{
+		const std::string oldmask = oldnick + "!" + user->GetRealUser() + "@" + user->GetDisplayedHost();
+		for (const Membership* memb : user->chans)
+			StoreEvent(memb->chan, HistoryItem::EventMask(oldmask, "NICK", { user->nick }));
+	}
+
+	void OnPostTopicChange(User* user, Channel* chan, const std::string& topic) override
+	{
+		StoreEvent(chan, HistoryItem::Event(user, "TOPIC", { chan->name, topic }));
+	}
+
+	void OnMode(User* user, User* usertarget, Channel* chantarget, const Modes::ChangeList& changelist,
+		ModeParser::ModeProcessFlag processflags) override
+	{
+		if (!chantarget || !saveevents)
+			return;
+
+		std::string modes;
+		std::vector<std::string> params = { chantarget->name };
+		char output_pm = '\0';
+		for (const auto& change : changelist.getlist())
+		{
+			const char needed_pm = change.adding ? '+' : '-';
+			if (needed_pm != output_pm)
+			{
+				output_pm = needed_pm;
+				modes.push_back(output_pm);
+			}
+			modes.push_back(change.mh->GetModeChar());
+		}
+		if (modes.empty())
+			return;
+		params.push_back(modes);
+		for (const auto& change : changelist.getlist())
+		{
+			if (!change.param.empty())
+				params.push_back(change.param);
+		}
+		StoreEvent(chantarget, HistoryItem::Event(user, "MODE", std::move(params)));
 	}
 };
 
