@@ -212,6 +212,9 @@ public:
 	IRCv3::Batch::CapReference batchcap;
 	IRCv3::ServerTime::API servertimemanager;
 	ClientProtocol::MessageTagEvent tagevent;
+	// Own provider: never use GetRFCEvents().join/part/… for replay — hooks
+	// (m_ircv3, delayjoin, auditorium) static_cast to Events::Join and crash.
+	ClientProtocol::EventProvider histprov;
 	CommandChatHistory cmd;
 	SimpleExtItem<HistoryList> chanhist;
 	UserModeReference botmode;
@@ -238,6 +241,7 @@ public:
 		, batchcap(this)
 		, servertimemanager(this)
 		, tagevent(this)
+		, histprov(this, "chathistory")
 		, cmd(this, *this, fail)
 		, chanhist(this, "ircv3-chathistory", ExtensionType::CHANNEL, false)
 		, botmode(this, "bot")
@@ -355,26 +359,6 @@ public:
 		Prune(*list);
 	}
 
-	ClientProtocol::EventProvider& EventProvFor(const std::string& command)
-	{
-		auto& ev = ServerInstance->GetRFCEvents();
-		if (command == "JOIN")
-			return ev.join;
-		if (command == "PART")
-			return ev.part;
-		if (command == "KICK")
-			return ev.kick;
-		if (command == "QUIT")
-			return ev.quit;
-		if (command == "NICK")
-			return ev.nick;
-		if (command == "MODE")
-			return ev.mode;
-		if (command == "TOPIC")
-			return ev.topic;
-		return ev.privmsg;
-	}
-
 	void SendBatch(LocalUser* user, const std::string& targetname,
 		const std::vector<const HistoryItem*>& items)
 	{
@@ -396,7 +380,7 @@ public:
 					servertimemanager->Set(out, item->ts, item->ms);
 				if (batch.IsRunning())
 					batch.AddToBatch(out);
-				user->Send(EventProvFor(item->command), out);
+				user->Send(histprov, out);
 				continue;
 			}
 
@@ -417,7 +401,8 @@ public:
 
 			if (batch.IsRunning())
 				batch.AddToBatch(out);
-			user->Send(ServerInstance->GetRFCEvents().privmsg, out);
+			// Same histprov as events — avoid RFC PRIVMSG hooks mutating replay.
+			user->Send(histprov, out);
 		}
 
 		if (batch.IsRunning())
