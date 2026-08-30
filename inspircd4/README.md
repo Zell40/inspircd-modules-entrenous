@@ -196,7 +196,9 @@ Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels
     maxquery="50"
     savepms="yes"
     savebots="yes"
-    saveevents="yes">
+    saveevents="yes"
+    clearminrank="op"
+    allowselfpmclear="yes">
 ```
 
 ## Configuration
@@ -209,6 +211,30 @@ Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels
 | `savepms` | yes | Historique des messages privés |
 | `savebots` | yes | Enregistrer les messages des umode `+B` |
 | `saveevents` | yes | Stocker JOIN/PART/… pour `draft/event-playback` |
+| `clearminrank` | `op` | Rang canal minimum pour `CHATHISTORY CLEAR #chan` (`voice` / `halfop` / `op` / `admin` / `founder`, lettre, ou rang numérique) |
+| `allowselfpmclear` | yes | Un utilisateur peut `CLEAR` l’historique de **sa** conversation privée avec un nick |
+
+## Purge manuelle : `CHATHISTORY CLEAR`
+
+```
+CHATHISTORY CLEAR #canal
+CHATHISTORY CLEAR AutreNick
+```
+
+Ne nécessite **pas** la CAP `draft/chathistory` (utile pour les ops / IRCops hors Orbit).
+
+| Qui | Canal | MP |
+|---|---|---|
+| Staff canal | Rang ≥ `clearminrank` (défaut `@`) | — |
+| Participant | — | Conversation avec ce nick si `allowselfpmclear` (buffer partagé : les deux côtés perdent l’historique serveur) |
+| IRCop | Priv `channels/clear-chathistory` (sans être op / membre) | Priv `users/clear-chathistory` : efface **toutes** les conversations MP impliquant ce nick (online ou offline) |
+
+Pistes de limitation IRCop (à coller dans `opers.conf` via `privs=` — voir `opers-entrenous.example.conf`) :
+
+- **`channels/clear-chathistory`** : NetAdmin + GlobalOp ; pas les classes « helpdesk » / local-only.
+- **`users/clear-chathistory`** : plus sensible (vie privée) → NetAdmin / senior staff seulement.
+- Combiner avec les classes InspIRCd existantes (`servers/`, `users/auspex`, etc.) : un op qui a déjà `users/auspex` n’obtient pas automatiquement le clear ; les deux privs sont **explicitement** à ajouter.
+- Audit : chaque CLEAR émet un snomask `a` (server notices).
 
 ISUPPORT : `CHATHISTORY=<maxquery>`, `MSGREFTYPES=timestamp,msgid`.
 
@@ -220,6 +246,11 @@ Sans `draft/event-playback` négocié, le batch ne contient que PRIVMSG/NOTICE (
 - `ircv3_batch` (**obligatoire** pour Orbit)
 - `ircv3_servertime` (tag `time`)
 - `ircv3_msgid` recommandé (tag `msgid` pour dédup / react)
+
+## Help / opers
+
+- Topics `/HELP` : [`help-entrenous.example.conf`](help-entrenous.example.conf) — à `include` depuis ton fichier help réseau.
+- Privs oper : [`opers-entrenous.example.conf`](opers-entrenous.example.conf)
 
 ---
 

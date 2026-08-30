@@ -20,7 +20,7 @@
  */
 
 /// $ModAuthor: Entre Nous IRCv3 port
-/// $ModConfig: <ircv3chathistory maxlines="500" maxduration="7d" maxquery="50" savepms="yes" savebots="yes" saveevents="yes">
+/// $ModConfig: <ircv3chathistory maxlines="500" maxduration="7d" maxquery="50" savepms="yes" savebots="yes" saveevents="yes" clearminrank="op" allowselfpmclear="yes">
 /// $ModDesc: Provides IRCv3 draft/chathistory and draft/event-playback (CHATHISTORY).
 /// $ModDepends: core 4
 
@@ -225,6 +225,8 @@ public:
 	bool savepms = true;
 	bool savebots = true;
 	bool saveevents = true;
+	bool allowselfpmclear = true;
+	ModeHandler::Rank clearminrank = OP_VALUE;
 
 	ModuleIRCv3ChatHistory()
 		: Module(VF_NONE, "Provides the IRCv3 draft/chathistory and draft/event-playback capabilities.")
@@ -242,6 +244,30 @@ public:
 	{
 	}
 
+	static ModeHandler::Rank RankFromName(const std::string& name)
+	{
+		if (irc::equals(name, "voice") || name == "v")
+			return VOICE_VALUE;
+		if (irc::equals(name, "halfop") || name == "h")
+			return HALFOP_VALUE;
+		if (irc::equals(name, "op") || name == "o")
+			return OP_VALUE;
+		// Conventional customprefix ranks (docs/conf/modules.example.conf).
+		if (irc::equals(name, "admin") || name == "a")
+			return 40000;
+		if (irc::equals(name, "founder") || irc::equals(name, "owner") || name == "q")
+			return 50000;
+
+		ModeHandler* mh = ServerInstance->Modes.FindMode(name, MODETYPE_CHANNEL);
+		if (mh)
+		{
+			PrefixMode* pm = mh->IsPrefixMode();
+			if (pm)
+				return pm->GetPrefixRank();
+		}
+		return ConvToNum<ModeHandler::Rank>(name);
+	}
+
 	void ReadConfig(ConfigStatus& status) override
 	{
 		const auto& tag = ServerInstance->Config->ConfValue("ircv3chathistory");
@@ -251,6 +277,10 @@ public:
 		savepms = tag->getBool("savepms", true);
 		savebots = tag->getBool("savebots", true);
 		saveevents = tag->getBool("saveevents", true);
+		allowselfpmclear = tag->getBool("allowselfpmclear", true);
+		clearminrank = RankFromName(tag->getString("clearminrank", "op"));
+		if (clearminrank == 0)
+			clearminrank = OP_VALUE;
 	}
 
 	void OnBuildISupport(ISupport::TokenMap& tokens) override
@@ -325,22 +355,22 @@ public:
 		Prune(*list);
 	}
 
-	ClientProtocol::EventProvider& EventProvFor(const std::string& cmd)
+	ClientProtocol::EventProvider& EventProvFor(const std::string& command)
 	{
 		auto& ev = ServerInstance->GetRFCEvents();
-		if (cmd == "JOIN")
+		if (command == "JOIN")
 			return ev.join;
-		if (cmd == "PART")
+		if (command == "PART")
 			return ev.part;
-		if (cmd == "KICK")
+		if (command == "KICK")
 			return ev.kick;
-		if (cmd == "QUIT")
+		if (command == "QUIT")
 			return ev.quit;
-		if (cmd == "NICK")
+		if (command == "NICK")
 			return ev.nick;
-		if (cmd == "MODE")
+		if (command == "MODE")
 			return ev.mode;
-		if (cmd == "TOPIC")
+		if (command == "TOPIC")
 			return ev.topic;
 		return ev.privmsg;
 	}
@@ -679,6 +709,121 @@ public:
 		return CmdResult::SUCCESS;
 	}
 
+	bool CanClearChannel(LocalUser* user, Channel* chan) const
+	{
+		if (user->HasPrivPermission("channels/clear-chathistory"))
+			return true;
+		if (!chan->HasUser(user))
+			return false;
+		return chan->GetPrefixValue(user) >= clearminrank;
+	}
+
+	bool CanClearPM(LocalUser* user, User* peer) const
+	{
+		if (user->HasPrivPermission("users/clear-chathistory"))
+			return true;
+		if (!allowselfpmclear)
+			return false;
+		return peer != nullptr;
+	}
+
+	size_t ClearAllPMForNick(const std::string& nick)
+	{
+		std::string needle = nick;
+		for (auto& c : needle)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		size_t n = 0;
+		for (auto it = pmhist.begin(); it != pmhist.end(); )
+		{
+			const size_t nul = it->first.find('\0');
+			const std::string a = it->first.substr(0, nul);
+			const std::string b = (nul == std::string::npos) ? std::string() : it->first.substr(nul + 1);
+			if (a == needle || b == needle)
+			{
+				n += it->second.lines.size();
+				it = pmhist.erase(it);
+			}
+			else
+				++it;
+		}
+		return n;
+	}
+
+	CmdResult HandleClear(LocalUser* user, const std::string& target)
+	{
+		if (ServerInstance->Channels.IsChannel(target))
+		{
+			Channel* chan = ServerInstance->Channels.Find(target);
+			if (!chan)
+			{
+				fail.Send(user, &cmd, "INVALID_TARGET", "CLEAR", target, "No such channel");
+				return CmdResult::FAILURE;
+			}
+			if (!CanClearChannel(user, chan))
+			{
+				if (user->IsOper())
+					user->WriteNumeric(ERR_NOPRIVILEGES, "Permission Denied - You need channels/clear-chathistory or sufficient channel rank");
+				else
+					user->WriteNumeric(ERR_CHANOPRIVSNEEDED, chan->name, "You're not channel operator");
+				return CmdResult::FAILURE;
+			}
+			HistoryList* list = GetChannelHistory(chan, false);
+			const size_t n = list ? list->lines.size() : 0;
+			if (list)
+				list->lines.clear();
+			user->WriteNotice("*** Cleared {} history entr{} for {}", n, n == 1 ? "y" : "ies", chan->name);
+			ServerInstance->SNO.WriteGlobalSno('a', "{} cleared chathistory for {} ({} entries)",
+				user->nick, chan->name, n);
+			return CmdResult::SUCCESS;
+		}
+
+		if (!savepms)
+		{
+			fail.Send(user, &cmd, "INVALID_TARGET", "CLEAR", target, "Private message history is disabled");
+			return CmdResult::FAILURE;
+		}
+
+		User* peer = ServerInstance->Users.FindNick(target);
+		if (!peer)
+		{
+			if (!user->HasPrivPermission("users/clear-chathistory"))
+			{
+				fail.Send(user, &cmd, "INVALID_TARGET", "CLEAR", target, "No such nick");
+				return CmdResult::FAILURE;
+			}
+			const size_t n = ClearAllPMForNick(target);
+			user->WriteNotice("*** Cleared {} PM history entr{} involving {}", n, n == 1 ? "y" : "ies", target);
+			ServerInstance->SNO.WriteGlobalSno('a', "{} cleared all PM chathistory involving {} ({} entries)",
+				user->nick, target, n);
+			return CmdResult::SUCCESS;
+		}
+
+		if (user->HasPrivPermission("users/clear-chathistory") && !irc::equals(user->nick, peer->nick))
+		{
+			const size_t n = ClearAllPMForNick(peer->nick);
+			user->WriteNotice("*** Cleared {} PM history entr{} involving {}", n, n == 1 ? "y" : "ies", peer->nick);
+			ServerInstance->SNO.WriteGlobalSno('a', "{} cleared all PM chathistory involving {} ({} entries)",
+				user->nick, peer->nick, n);
+			return CmdResult::SUCCESS;
+		}
+
+		if (!CanClearPM(user, peer))
+		{
+			user->WriteNumeric(ERR_NOPRIVILEGES, "Permission Denied - You cannot clear this private history");
+			return CmdResult::FAILURE;
+		}
+
+		const std::string key = PMKey(user, peer);
+		auto it = pmhist.find(key);
+		const size_t n = (it != pmhist.end()) ? it->second.lines.size() : 0;
+		if (it != pmhist.end())
+			pmhist.erase(it);
+		user->WriteNotice("*** Cleared {} PM history entr{} with {}", n, n == 1 ? "y" : "ies", peer->nick);
+		ServerInstance->SNO.WriteGlobalSno('a', "{} cleared PM chathistory with {} ({} entries)",
+			user->nick, peer->nick, n);
+		return CmdResult::SUCCESS;
+	}
+
 	void OnUserPostMessage(User* user, const MessageTarget& target, const MessageDetails& details) override
 	{
 		if (user->IsModeSet(botmode) && !savebots)
@@ -786,7 +931,7 @@ public:
 };
 
 CommandChatHistory::CommandChatHistory(Module* Creator, ModuleIRCv3ChatHistory& Mod, IRCv3::Replies::Fail& Fail)
-	: SplitCommand(Creator, "CHATHISTORY", 3)
+	: SplitCommand(Creator, "CHATHISTORY", 2)
 	, mod(Mod)
 	, fail(Fail)
 {
@@ -794,16 +939,27 @@ CommandChatHistory::CommandChatHistory(Module* Creator, ModuleIRCv3ChatHistory& 
 
 CmdResult CommandChatHistory::HandleLocal(LocalUser* user, const Params& parameters)
 {
+	std::string sub = parameters[0];
+	for (auto& c : sub)
+		c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
+	// CLEAR does not require the client capability (channel ops / opers).
+	if (sub == "CLEAR")
+	{
+		if (parameters.size() < 2)
+		{
+			fail.Send(user, this, "INVALID_PARAMS", sub, "Insufficient parameters");
+			return CmdResult::FAILURE;
+		}
+		return mod.HandleClear(user, parameters[1]);
+	}
+
 	if (!mod.cap.IsEnabled(user))
 	{
 		fail.Send(user, this, "INVALID_CAP", "draft/chathistory",
 			"You must request draft/chathistory to use this command");
 		return CmdResult::FAILURE;
 	}
-
-	std::string sub = parameters[0];
-	for (auto& c : sub)
-		c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 
 	if (sub == "TARGETS")
 	{
