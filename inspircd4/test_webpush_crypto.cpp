@@ -1,9 +1,9 @@
 /*
  * RFC 8291 Appendix A vector test for webpush_crypto.h
- * Build: g++ -O2 -o test_webpush_crypto test_webpush_crypto.cpp -lcrypto
+ * Build (from inspircd4/): g++ -O2 -o test_webpush_crypto test_webpush_crypto.cpp -lcrypto
  */
 
-#include "webpush_crypto.h"
+#include "m_ircv3_webpush/webpush_crypto.h"
 
 #include <cstdio>
 #include <cstdlib>

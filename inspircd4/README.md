@@ -1,6 +1,8 @@
 # Modules InspIRCd 4 (Entre Nous)
 
-Copier les fichiers `.cpp` (et `.h` associés) dans `src/modules/` de ton arbre [InspIRCd 4](https://github.com/inspircd/inspircd), puis recompiler (`make`).
+Copier les modules dans `src/modules/` de ton arbre [InspIRCd 4](https://github.com/inspircd/inspircd), puis recompiler (`make`).
+
+Un module peut être **un seul** `m_….cpp`, ou un **dossier** `m_…/` (plusieurs `.cpp` / `.h` à l’intérieur — InspIRCd les compile comme un seul module, comme `m_spanningtree`).
 
 ---
 
@@ -91,6 +93,77 @@ Un squelette Anope 2 est dans `anope/ns_ircv3_register.cpp`.
 
 ---
 
+# m_ircv3_metadata
+
+Module extra pour [draft/metadata-2](https://ircv3.net/specs/extensions/metadata.html) et [draft/metadata-3](https://github.com/ircv3/ircv3-specifications/pull/613) : commandes `METADATA` (`GET` / `SET` / `LIST` / `CLEAR` / `SUB` / `UNSUB` / `SUBS` / `SYNC`).
+
+Compatible avec **Orbit**, qui négocie uniquement `draft/metadata-2` et attend :
+- `METADATA * SUB avatar bio pronouns timezone url`
+- `METADATA <nick> GET …`
+- pushes live en verbe `METADATA <target> <key> <visibility> [:<value>]` (ou numeric `761`)
+
+Les clients `draft/metadata-3` reçoivent les pushes en numeric `761` / `766` (comportement -3).
+
+Stockage local (fichier data), clé = **compte** SASL si connecté, sinon nick. Pas de sync S2S pour l’instant (réseau mono-serveur).
+
+## Installation
+
+1. Copier le dossier `m_ircv3_metadata/` dans `src/modules/` de ton arbre InspIRCd 4.
+2. Recompiler (`make`).
+3. Charger **après** `cap` (et `account` / `ircv3_batch` / `monitor` recommandés) :
+
+```xml
+<module name="cap">
+<module name="account">
+<module name="ircv3">
+<module name="ircv3_batch">
+<module name="monitor">
+<module name="ircv3_metadata">
+
+<ircv3metadata
+    maxsubs="32"
+    maxkeys="16"
+    maxvaluebytes="500"
+    requireaccount="yes"
+    allowkeys="avatar bio pronouns timezone url"
+    persistfile="ircv3-metadata.db"
+    synclimit="200"
+    beforeconnect="no"
+    saveperiod="30s">
+```
+
+## Configuration
+
+| Attribut | Défaut | Effet |
+|---|---|---|
+| `maxsubs` | 32 | Plafond de clés en `SUB` |
+| `maxkeys` | 16 | Plafond de clés stockées par utilisateur/canal |
+| `maxvaluebytes` | 500 | Taille max d’une valeur |
+| `requireaccount` | yes | `SET` exige un compte SASL |
+| `allowkeys` | `avatar bio pronouns timezone url` | Liste blanche (vide = toute clé valide) |
+| `persistfile` | `ircv3-metadata.db` | Persistance des métadonnées utilisateur |
+| `synclimit` | 200 | Au-delà, `JOIN` envoie `774` au lieu du burst |
+| `beforeconnect` | no | Autoriser `METADATA` avant le 001 |
+| `saveperiod` | 30s | Fréquence d’écriture du fichier |
+
+Les caps ne sont **pas** listées en CAP LS 301. Le client **doit** `CAP REQ draft/metadata-2` (Orbit) ou `draft/metadata-3`.
+
+Exemple Orbit / client :
+```
+METADATA * SET avatar :https://cdn.example/me.png
+METADATA * SET bio :Bonjour
+METADATA Alice GET avatar bio pronouns timezone url
+```
+
+## Dépendances
+
+- `cap` (obligatoire pour annoncer les caps)
+- `account` si `requireaccount="yes"`
+- `ircv3_batch` recommandé (batches `metadata` / `metadata-subs`)
+- `monitor` optionnel (pousse aussi vers les cibles MONITOR)
+
+---
+
 # m_ircv3_webpush
 
 Module extra pour l’extension IRCv3 [Web Push](https://github.com/ircv3/ircv3-specifications/pull/471) (vendored `soju.im/webpush`, aussi annoncé comme `draft/webpush`). Compatible avec les clients type Goguma.
@@ -108,8 +181,8 @@ InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que 
 
 Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les certificats CA système doivent être installés pour valider le TLS des endpoints (FCM, Mozilla autopush, etc.).
 
-1. Copier `m_ircv3_webpush.cpp` **et** `webpush_crypto.h` dans `src/modules/` de ton arbre InspIRCd 4.
-2. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` du `.cpp`.
+1. Copier le dossier `m_ircv3_webpush/` entier dans `src/modules/` de ton arbre InspIRCd 4 (une seule entrée, comme `m_spanningtree`).
+2. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` de `main.cpp`.
 3. Charger **après** `cap` (et `account` si `requireaccount="yes"`) :
 
 ```xml
@@ -174,6 +247,7 @@ Les POST partent d’un thread dédié pour ne pas bloquer l’ircd.
 Hors InspIRCd, les vecteurs de l’annexe A de RFC 8291 :
 
 ```
+cd inspircd4
 g++ -O2 -o test_webpush_crypto test_webpush_crypto.cpp -lcrypto
 ./test_webpush_crypto
 ```
