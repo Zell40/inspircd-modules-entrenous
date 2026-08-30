@@ -756,7 +756,7 @@ public:
 			ServerInstance->Logs.Normal(MODNAME, "Unable to write {}", tmp);
 			return;
 		}
-		out << "# m_webpush subscriptions v1\n";
+		out << "# m_ircv3_webpush subscriptions v1\n";
 		for (const auto& [owner, rec] : owners)
 		{
 			for (const auto& sub : rec.subs)

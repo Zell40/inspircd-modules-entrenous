@@ -1,5 +1,5 @@
 /*
- * Web Push helpers for InspIRCd m_webpush (RFC 8030, RFC 8188, RFC 8291, RFC 8292).
+ * Web Push helpers for InspIRCd m_ircv3_webpush (RFC 8030, RFC 8188, RFC 8291, RFC 8292).
  *
  * OpenSSL 1.1.1+ / 3.x. No InspIRCd dependency — used by the module and the
  * RFC 8291 vector test.

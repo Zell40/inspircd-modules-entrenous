@@ -91,7 +91,7 @@ Un squelette Anope 2 est dans `anope/ns_ircv3_register.cpp`.
 
 ---
 
-# m_webpush
+# m_ircv3_webpush
 
 Module extra pour l’extension IRCv3 [Web Push](https://github.com/ircv3/ircv3-specifications/pull/471) (vendored `soju.im/webpush`, aussi annoncé comme `draft/webpush`). Compatible avec les clients type Goguma.
 
@@ -108,7 +108,7 @@ InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que 
 
 Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les certificats CA système doivent être installés pour valider le TLS des endpoints (FCM, Mozilla autopush, etc.).
 
-1. Copier `m_webpush.cpp` **et** `webpush_crypto.h` dans `src/modules/` de ton arbre InspIRCd 4.
+1. Copier `m_ircv3_webpush.cpp` **et** `webpush_crypto.h` dans `src/modules/` de ton arbre InspIRCd 4.
 2. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` du `.cpp`.
 3. Charger **après** `cap` (et `account` si `requireaccount="yes"`) :
 
@@ -116,7 +116,7 @@ Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les cer
 <module name="cap">
 <module name="account">
 <module name="ircv3">
-<module name="webpush">
+<module name="ircv3_webpush">
 
 <webpush
     vapidfile="webpush-vapid.pem"
