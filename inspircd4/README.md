@@ -1,4 +1,10 @@
-# m_account_registration (InspIRCd 4)
+# Modules InspIRCd 4 (Entre Nous)
+
+Copier les fichiers `.cpp` (et `.h` associés) dans `src/modules/` de ton arbre [InspIRCd 4](https://github.com/inspircd/inspircd), puis recompiler (`make`).
+
+---
+
+# m_account_registration
 
 Module extra pour [draft/account-registration](https://ircv3.net/specs/extensions/account-registration) : commandes `REGISTER` / `VERIFY`, cap `draft/account-registration`, codes FAIL de la spec.
 
@@ -82,3 +88,99 @@ Codes FAIL côté services (spec) : `ACCOUNT_EXISTS`, `BAD_ACCOUNT_NAME`, `WEAK_
 - Services qui implémentent `ACCREG` (pas encore dans Anope/Atheme stock)
 
 Un squelette Anope 2 est dans `anope/ns_ircv3_register.cpp`.
+
+---
+
+# m_webpush
+
+Module extra pour l’extension IRCv3 [Web Push](https://github.com/ircv3/ircv3-specifications/pull/471) (vendored `soju.im/webpush`, aussi annoncé comme `draft/webpush`). Compatible avec les clients type Goguma.
+
+Le module :
+
+- annonce les caps et le token ISUPPORT `VAPID` (clé publique P-256, RFC 8292) ;
+- implémente `WEBPUSH REGISTER <endpoint> <keys>` et `WEBPUSH UNREGISTER <endpoint>` ;
+- chiffre le payload en **aes128gcm** (RFC 8291) et POSTe en HTTPS vers l’endpoint ;
+- refuse les URL non-`https` et les adresses privées / loopback (protection SSRF, comme soju/Ergo).
+
+InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que si **une session du compte est encore connectée** (ou away). Les MP vers le dernier nick d’un compte déconnecté peuvent encore déclencher un push (`pushoffline`).
+
+## Installation
+
+Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les certificats CA système doivent être installés pour valider le TLS des endpoints (FCM, Mozilla autopush, etc.).
+
+1. Copier `m_webpush.cpp` **et** `webpush_crypto.h` dans `src/modules/` de ton arbre InspIRCd 4.
+2. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` du `.cpp`.
+3. Charger **après** `cap` (et `account` si `requireaccount="yes"`) :
+
+```xml
+<module name="cap">
+<module name="account">
+<module name="ircv3">
+<module name="webpush">
+
+<webpush
+    vapidfile="webpush-vapid.pem"
+    persistfile="webpush.db"
+    contact="mailto:admin@example.net"
+    requireaccount="yes"
+    maxsubscriptions="5"
+    ttl="1d"
+    expiration="30d"
+    pushaway="yes"
+    pushoffline="yes"
+    pushalways="no"
+    testonregister="yes"
+    httptimeout="15s">
+```
+
+Au premier démarrage, une paire de clés VAPID est générée dans `vapidfile` (répertoire data d’InspIRCd). **Garde ce fichier** : changer la clé publique casse les abonnements existants.
+
+## Configuration
+
+| Attribut | Défaut | Effet |
+|---|---|---|
+| `vapidfile` | `webpush-vapid.pem` | Clé privée VAPID (PEM) |
+| `persistfile` | `webpush.db` | Abonnements persistés (redémarrage) |
+| `contact` | `mailto:webpush@<servername>` | Claim `sub` JWT VAPID (`mailto:` ou `https:`) |
+| `requireaccount` | yes | `WEBPUSH` exige un compte SASL / services |
+| `maxsubscriptions` | 5 | Plafond d’endpoints par compte |
+| `ttl` | 86400 | Header HTTP `TTL` (RFC 8030) |
+| `expiration` | 30d | Oublier un abonnement non renouvelé |
+| `pushaway` | yes | Push si le destinataire est away |
+| `pushoffline` | yes | Push des MP vers le dernier nick d’un compte offline |
+| `pushalways` | no | Push même si le client enregistré est encore connecté |
+| `testonregister` | yes | Envoie `PING webpush` pour valider l’endpoint |
+| `httptimeout` | 15s | Timeout du POST HTTPS |
+| `maxperminute` | 30 | Rate-limit de pushes par compte |
+| `saveperiod` | 30s | Fréquence d’écriture de `persistfile` |
+
+Les caps ne sont **pas** listées en CAP LS 301. Le client **doit** `CAP REQ soju.im/webpush` (ou `draft/webpush`) avant `WEBPUSH`.
+
+`keys` est au format message-tags : `p256dh=<b64url>;auth=<b64url>`.
+
+## Quand un push part
+
+- **PRIVMSG/NOTICE** privé vers un utilisateur local qui a des abonnements, s’il est away, si `pushalways` est actif, ou si plus aucune session « registrar » n’est en ligne.
+- **Highlight** (nick, frontières de mot) dans un canal, mêmes conditions.
+- **INVITE**.
+- **MP offline** : `PRIVMSG`/`NOTICE` vers un nick inexistant qui était le dernier nick d’un compte abonné (`pushoffline`).
+
+Le payload est **une ligne IRC** sans CRLF, avec tags `time`, `msgid` (si présent) et `account` (si présent). Un `410`/`404` HTTP retire l’abonnement.
+
+Les POST partent d’un thread dédié pour ne pas bloquer l’ircd.
+
+## Test crypto (RFC 8291)
+
+Hors InspIRCd, les vecteurs de l’annexe A de RFC 8291 :
+
+```
+g++ -O2 -o test_webpush_crypto test_webpush_crypto.cpp -lcrypto
+./test_webpush_crypto
+```
+
+## Dépendances
+
+- `cap`
+- `account` si `requireaccount="yes"`
+- OpenSSL (libcrypto + libssl)
+- Un client Web Push (ex. Goguma)
