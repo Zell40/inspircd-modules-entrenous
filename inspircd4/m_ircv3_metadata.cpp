@@ -25,6 +25,7 @@
 /// $ModDepends: core 4
 
 #include "inspircd.h"
+#include "clientprotocolmsg.h"
 #include "modules/account.h"
 #include "modules/cap.h"
 #include "modules/ircv3_batch.h"
@@ -96,8 +97,8 @@ class MetaCap final
 	}
 
 public:
-	MetaCap(Module* mod, const std::string& name)
-		: Cap::Capability(mod, name)
+	MetaCap(Module* mod, const std::string& capname)
+		: Cap::Capability(mod, capname)
 	{
 	}
 
