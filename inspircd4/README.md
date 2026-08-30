@@ -110,13 +110,12 @@ Stockage local (fichier data), clé = **compte** SASL si connecté, sinon nick. 
 
 1. Copier `m_ircv3_metadata.cpp` dans `src/modules/` de ton arbre InspIRCd 4.
 2. Recompiler (`make`).
-3. Charger **après** `cap` (et `account` / `ircv3_batch` / `monitor` recommandés) :
+3. Charger **après** `cap` (et `account` / `monitor` recommandés) :
 
 ```xml
 <module name="cap">
 <module name="account">
 <module name="ircv3">
-<module name="ircv3_batch">
 <module name="monitor">
 <module name="ircv3_metadata">
 
@@ -159,7 +158,6 @@ METADATA Alice GET avatar bio pronouns timezone url
 
 - `cap` (obligatoire pour annoncer les caps)
 - `account` si `requireaccount="yes"`
-- `ircv3_batch` recommandé (batches `metadata` / `metadata-subs`)
 - `monitor` optionnel (pousse aussi vers les cibles MONITOR)
 
 ---

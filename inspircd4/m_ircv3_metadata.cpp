@@ -25,10 +25,8 @@
 /// $ModDepends: core 4
 
 #include "inspircd.h"
-#include "clientprotocolmsg.h"
 #include "modules/account.h"
 #include "modules/cap.h"
-#include "modules/ircv3_batch.h"
 #include "modules/ircv3_replies.h"
 #include "modules/monitor.h"
 #include "modules/whois.h"
@@ -137,8 +135,6 @@ public:
 	MetaCap cap2;
 	MetaCap cap3;
 	IRCv3::Replies::Fail fail;
-	IRCv3::Batch::API batchmanager;
-	IRCv3::Batch::CapReference batchcap;
 	ClientProtocol::EventProvider metaev;
 	CommandMetadata cmd;
 	SimpleExtItem<UserSubs> subsext;
@@ -167,8 +163,6 @@ public:
 		, cap2(this, "draft/metadata-2")
 		, cap3(this, "draft/metadata-3")
 		, fail(this)
-		, batchmanager(this)
-		, batchcap(this)
 		, metaev(this, "METADATA")
 		, cmd(this, *this, fail)
 		, subsext(this, "ircv3-metadata-subs", ExtensionType::USER, false)
@@ -296,25 +290,14 @@ public:
 	}
 
 	void SendKeyValue(LocalUser* user, const std::string& target, const std::string& key,
-		const std::string& value, IRCv3::Batch::Batch* batch)
+		const std::string& value)
 	{
-		Numeric::Numeric n(RPL_KEYVALUE);
-		n.push(target).push(key).push("*").push(value);
-		ClientProtocol::Messages::Numeric msg(n, user);
-		if (batch && batch->IsRunning())
-			batch->AddToBatch(msg);
-		user->Send(ServerInstance->GetRFCEvents().numeric, msg);
+		user->WriteNumeric(RPL_KEYVALUE, target, key, "*", value);
 	}
 
-	void SendKeyNotSet(LocalUser* user, const std::string& target, const std::string& key,
-		IRCv3::Batch::Batch* batch)
+	void SendKeyNotSet(LocalUser* user, const std::string& target, const std::string& key)
 	{
-		Numeric::Numeric n(RPL_KEYNOTSET);
-		n.push(target).push(key).push("key not set");
-		ClientProtocol::Messages::Numeric msg(n, user);
-		if (batch && batch->IsRunning())
-			batch->AddToBatch(msg);
-		user->Send(ServerInstance->GetRFCEvents().numeric, msg);
+		user->WriteNumeric(RPL_KEYNOTSET, target, key, "key not set");
 	}
 
 	/** Live notification: METADATA verb for -2 (Orbit), 761/766 for -3. */
@@ -327,9 +310,9 @@ public:
 		if (PreferMeta3(watcher))
 		{
 			if (value)
-				SendKeyValue(watcher, target, key, *value, nullptr);
+				SendKeyValue(watcher, target, key, *value);
 			else
-				SendKeyNotSet(watcher, target, key, nullptr);
+				SendKeyNotSet(watcher, target, key);
 			return;
 		}
 
@@ -430,7 +413,7 @@ public:
 	}
 
 	void PushKeysToUser(LocalUser* watcher, const std::string& target, const MetaMap* store,
-		const KeySet* filter, IRCv3::Batch::Batch* batch)
+		const KeySet* filter)
 	{
 		if (!store || !filter)
 			return;
@@ -439,8 +422,8 @@ public:
 			auto it = store->find(key);
 			if (it == store->end())
 				continue;
-			if (PreferMeta3(watcher) || batch)
-				SendKeyValue(watcher, target, key, it->second, batch);
+			if (PreferMeta3(watcher))
+				SendKeyValue(watcher, target, key, it->second);
 			else
 				NotifyWatcher(watcher, target, key, &it->second);
 		}
@@ -459,18 +442,9 @@ public:
 			return;
 		}
 
-		IRCv3::Batch::Batch batch("metadata");
-		const bool use_batch = PreferMeta3(user) && batchmanager && batchcap.IsEnabled(user);
-		if (use_batch)
-		{
-			batchmanager->Start(batch);
-			batch.GetBatchStartMessage().PushParamRef(chan->name);
-		}
-		IRCv3::Batch::Batch* bp = batch.IsRunning() ? &batch : nullptr;
-
 		MetaMap* cstore = chanmetaext.Get(chan);
 		if (PreferMeta3(user))
-			PushKeysToUser(user, chan->name, cstore, &subs->keys, bp);
+			PushKeysToUser(user, chan->name, cstore, &subs->keys);
 		else if (cstore)
 		{
 			for (const auto& key : subs->keys)
@@ -485,7 +459,7 @@ public:
 		{
 			MetaMap* ustore = GetUserStore(member, false);
 			if (PreferMeta3(user))
-				PushKeysToUser(user, member->nick, ustore, &subs->keys, bp);
+				PushKeysToUser(user, member->nick, ustore, &subs->keys);
 			else if (ustore)
 			{
 				for (const auto& key : subs->keys)
@@ -496,21 +470,10 @@ public:
 				}
 			}
 		}
-
-		if (batch.IsRunning())
-			batchmanager->End(batch);
 	}
 
 	void HandleGet(LocalUser* user, const std::string& target, const std::vector<std::string>& keys)
 	{
-		IRCv3::Batch::Batch batch("metadata");
-		if (batchmanager && batchcap.IsEnabled(user))
-		{
-			batchmanager->Start(batch);
-			batch.GetBatchStartMessage().PushParam(target);
-		}
-		IRCv3::Batch::Batch* bp = batch.IsRunning() ? &batch : nullptr;
-
 		MetaMap* store = nullptr;
 		std::string display = target;
 
@@ -525,8 +488,6 @@ public:
 			if (!chan)
 			{
 				FailInvalidTarget(user, target);
-				if (batch.IsRunning())
-					batchmanager->End(batch);
 				return;
 			}
 			store = chanmetaext.Get(chan);
@@ -537,8 +498,6 @@ public:
 			if (!dest)
 			{
 				FailInvalidTarget(user, target);
-				if (batch.IsRunning())
-					batchmanager->End(batch);
 				return;
 			}
 			store = GetUserStore(dest, false);
@@ -559,32 +518,21 @@ public:
 			}
 			if (!store)
 			{
-				SendKeyNotSet(user, display, key, bp);
+				SendKeyNotSet(user, display, key);
 				continue;
 			}
 			auto it = store->find(key);
 			if (it == store->end())
-				SendKeyNotSet(user, display, key, bp);
+				SendKeyNotSet(user, display, key);
 			else
-				SendKeyValue(user, display, key, it->second, bp);
+				SendKeyValue(user, display, key, it->second);
 		}
 
-		if (batch.IsRunning())
-			batchmanager->End(batch);
-		else
-			user->WriteNumeric(RPL_METADATAEND, "end of metadata");
+		user->WriteNumeric(RPL_METADATAEND, "end of metadata");
 	}
 
 	void HandleList(LocalUser* user, const std::string& target)
 	{
-		IRCv3::Batch::Batch batch("metadata");
-		if (batchmanager && batchcap.IsEnabled(user))
-		{
-			batchmanager->Start(batch);
-			batch.GetBatchStartMessage().PushParam(target);
-		}
-		IRCv3::Batch::Batch* bp = batch.IsRunning() ? &batch : nullptr;
-
 		MetaMap* store = nullptr;
 		std::string display = target;
 		if (target == "*")
@@ -598,8 +546,6 @@ public:
 			if (!chan)
 			{
 				FailInvalidTarget(user, target);
-				if (batch.IsRunning())
-					batchmanager->End(batch);
 				return;
 			}
 			store = chanmetaext.Get(chan);
@@ -610,8 +556,6 @@ public:
 			if (!dest)
 			{
 				FailInvalidTarget(user, target);
-				if (batch.IsRunning())
-					batchmanager->End(batch);
 				return;
 			}
 			store = GetUserStore(dest, false);
@@ -623,12 +567,9 @@ public:
 			for (const auto& [key, value] : *store)
 			{
 				if (KeyAllowed(key))
-					SendKeyValue(user, display, key, value, bp);
+					SendKeyValue(user, display, key, value);
 			}
 		}
-
-		if (batch.IsRunning())
-			batchmanager->End(batch);
 	}
 
 	CmdResult HandleSet(LocalUser* user, const std::string& target, const std::string& key,
@@ -670,7 +611,7 @@ public:
 			{
 				if (store)
 					store->erase(key);
-				SendKeyNotSet(user, target, key, nullptr);
+				SendKeyNotSet(user, target, key);
 				NotifyChannelKeyChange(chan, key, nullptr);
 			}
 			else
@@ -681,7 +622,7 @@ public:
 					return CmdResult::FAILURE;
 				}
 				(*store)[key] = *value_opt;
-				SendKeyValue(user, target, key, *value_opt, nullptr);
+				SendKeyValue(user, target, key, *value_opt);
 				NotifyChannelKeyChange(chan, key, value_opt);
 			}
 			return CmdResult::SUCCESS;
@@ -711,7 +652,7 @@ public:
 			if (store->empty())
 				usermeta.erase(OwnerKey(user));
 			dirty = true;
-			SendKeyNotSet(user, "*", key, nullptr);
+			SendKeyNotSet(user, "*", key);
 			NotifyUserKeyChange(user, key, nullptr);
 		}
 		else
@@ -723,7 +664,7 @@ public:
 			}
 			(*store)[key] = *value_opt;
 			dirty = true;
-			SendKeyValue(user, "*", key, *value_opt, nullptr);
+			SendKeyValue(user, "*", key, *value_opt);
 			NotifyUserKeyChange(user, key, value_opt);
 		}
 		return CmdResult::SUCCESS;
@@ -755,7 +696,7 @@ public:
 				}();
 				for (const auto& k : keys)
 				{
-					SendKeyNotSet(user, target, k, nullptr);
+					SendKeyNotSet(user, target, k);
 					NotifyChannelKeyChange(chan, k, nullptr);
 				}
 				store->clear();
@@ -777,7 +718,7 @@ public:
 				keys.insert(k);
 			for (const auto& k : keys)
 			{
-				SendKeyNotSet(user, "*", k, nullptr);
+				SendKeyNotSet(user, "*", k);
 				NotifyUserKeyChange(user, k, nullptr);
 			}
 			usermeta.erase(OwnerKey(user));
@@ -829,7 +770,7 @@ public:
 			KeySet filter(ok.begin(), ok.end());
 			MetaMap* self = GetUserStore(user, false);
 			if (PreferMeta3(user))
-				PushKeysToUser(user, user->nick, self, &filter, nullptr);
+				PushKeysToUser(user, user->nick, self, &filter);
 			else if (self)
 			{
 				for (const auto& k : filter)
@@ -849,39 +790,20 @@ public:
 	void HandleSubs(LocalUser* user)
 	{
 		UserSubs* subs = GetSubs(user, false);
-		IRCv3::Batch::Batch batch("metadata-subs");
-		if (batchmanager && batchcap.IsEnabled(user))
-			batchmanager->Start(batch);
+		if (!subs || subs->keys.empty())
+			return;
 
-		if (subs && !subs->keys.empty())
-		{
-			Numeric::Numeric n(RPL_METADATASUBS);
-			for (const auto& k : subs->keys)
-				n.push(k);
-			ClientProtocol::Messages::Numeric msg(n, user);
-			if (batch.IsRunning())
-				batch.AddToBatch(msg);
-			user->Send(ServerInstance->GetRFCEvents().numeric, msg);
-		}
-
-		if (batch.IsRunning())
-			batchmanager->End(batch);
+		Numeric::Numeric n(RPL_METADATASUBS);
+		for (const auto& k : subs->keys)
+			n.push(k);
+		user->WriteNumeric(n);
 	}
 
 	CmdResult HandleSync(LocalUser* user, const std::string& target)
 	{
 		UserSubs* subs = GetSubs(user, false);
 		if (!subs || subs->keys.empty())
-		{
-			IRCv3::Batch::Batch batch("metadata");
-			if (batchmanager && batchcap.IsEnabled(user))
-			{
-				batchmanager->Start(batch);
-				batch.GetBatchStartMessage().PushParam(target);
-				batchmanager->End(batch);
-			}
 			return CmdResult::SUCCESS;
-		}
 
 		if (target == "*ALL")
 		{
@@ -909,15 +831,9 @@ public:
 			return CmdResult::FAILURE;
 		}
 
-		IRCv3::Batch::Batch batch("metadata");
-		if (batchmanager && batchcap.IsEnabled(user))
-		{
-			batchmanager->Start(batch);
-			batch.GetBatchStartMessage().PushParam(dest->nick);
-		}
 		MetaMap* store = GetUserStore(dest, false);
 		if (PreferMeta3(user))
-			PushKeysToUser(user, dest->nick, store, &subs->keys, batch.IsRunning() ? &batch : nullptr);
+			PushKeysToUser(user, dest->nick, store, &subs->keys);
 		else if (store)
 		{
 			for (const auto& k : subs->keys)
@@ -927,8 +843,6 @@ public:
 					NotifyWatcher(user, dest->nick, k, &it->second);
 			}
 		}
-		if (batch.IsRunning())
-			batchmanager->End(batch);
 		return CmdResult::SUCCESS;
 	}
 
@@ -964,12 +878,6 @@ public:
 		if (!lu || !HasMeta(lu))
 			return;
 
-		IRCv3::Batch::Batch batch("metadata");
-		if (batchmanager && batchcap.IsEnabled(lu))
-		{
-			batchmanager->Start(batch);
-			batch.GetBatchStartMessage().PushParamRef(lu->nick);
-		}
 		MetaMap* store = GetUserStore(lu, false);
 		KeySet all;
 		if (store)
@@ -978,14 +886,12 @@ public:
 				all.insert(k);
 		}
 		if (PreferMeta3(lu))
-			PushKeysToUser(lu, lu->nick, store, &all, batch.IsRunning() ? &batch : nullptr);
+			PushKeysToUser(lu, lu->nick, store, &all);
 		else if (store)
 		{
 			for (const auto& [k, v] : *store)
 				NotifyWatcher(lu, lu->nick, k, &v);
 		}
-		if (batch.IsRunning())
-			batchmanager->End(batch);
 	}
 
 	void OnAccountChange(User* user, const std::string& account) override
