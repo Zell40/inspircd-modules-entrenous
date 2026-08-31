@@ -165,7 +165,7 @@ public:
 
 	bool ShouldSendTag(LocalUser* user, const ClientProtocol::MessageTagData& tagdata) override
 	{
-		return irc::equals(tagdata.key, CONCAT_TAG);
+		return tagdata.tagprov == this;
 	}
 };
 
@@ -183,7 +183,7 @@ public:
 
 	bool ShouldSendTag(LocalUser* user, const ClientProtocol::MessageTagData& tagdata) override
 	{
-		return echocap.IsEnabled(user) && irc::equals(tagdata.key, "inspircd.org/echo");
+		return echocap.IsEnabled(user) && tagdata.tagprov == this;
 	}
 };
 
