@@ -469,7 +469,7 @@ public:
 		return true;
 	}
 
-	void AddCommonTags(ClientProtocol::Message& msg, const std::string& msgid, User* source) const
+	void AddCommonTags(ClientProtocol::Message& msg, const std::string& msgid, User* source)
 	{
 		if (!msgid.empty())
 			msg.AddTag("msgid", &concat_tag, msgid);
@@ -497,7 +497,7 @@ public:
 	}
 
 	void SendFallback(LocalUser* dest, User* source, const std::string& targetname, MessageType type,
-		char status, const MultilineBatchState& state, const std::string& msgid, bool echo) const
+		char status, const MultilineBatchState& state, const std::string& msgid, bool echo)
 	{
 		bool msgid_sent = false;
 		for (const MultilineLine& line : state.lines)
