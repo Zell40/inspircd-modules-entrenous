@@ -20,7 +20,7 @@
  */
 
 /// $ModAuthor: Entre Nous IRCv3 port
-/// $ModConfig: <ircv3multiline maxlines="20" maxbytes="40000">
+/// $ModConfig: <ircv3multiline maxlines="20" maxbytes="40000" batchtimeout="30s" maxbatchesperminute="10">
 /// $ModDesc: Provides the IRCv3 draft/multiline capability (client batches).
 /// $ModDepends: core 4
 
@@ -34,6 +34,7 @@
 #include "modules/ircv3_servertime.h"
 
 #include <cctype>
+#include <deque>
 
 static constexpr const char* BATCH_TYPE = "draft/multiline";
 static constexpr const char* CONCAT_TAG = "draft/multiline-concat";
@@ -68,6 +69,19 @@ struct MultilineBatchState final
 		content_bytes = 0;
 		batch_tags.clear();
 		label.clear();
+	}
+};
+
+struct MultilineUserExt final
+{
+	MultilineBatchState batch;
+	time_t batch_opened = 0;
+	std::deque<time_t> completions;
+
+	void ResetBatch()
+	{
+		batch.Reset();
+		batch_opened = 0;
 	}
 };
 
@@ -188,6 +202,7 @@ public:
 
 class ModuleIRCv3Multiline final
 	: public Module
+	, public Timer
 {
 public:
 	MultilineCap cap;
@@ -200,7 +215,7 @@ public:
 	Account::API accountapi;
 	Cap::Capability echomsgcap;
 	CommandBatch batchcmd;
-	SimpleExtItem<MultilineBatchState> stateext;
+	SimpleExtItem<MultilineUserExt> userext;
 	ChanModeReference moderatedmode;
 	ChanModeReference noextmsgmode;
 
@@ -209,10 +224,13 @@ public:
 
 	size_t maxlines = 20;
 	size_t maxbytes = 40000;
+	unsigned long batchtimeout = 30;
+	size_t maxbatchesperminute = 10;
 	uint64_t msgid_counter = 0;
 
 	ModuleIRCv3Multiline()
 		: Module(VF_NONE, "Provides the IRCv3 draft/multiline capability.")
+		, Timer(5, true)
 		, cap(this)
 		, concat_tag(this)
 		, echo_tag(this)
@@ -223,7 +241,7 @@ public:
 		, accountapi(this)
 		, echomsgcap(this, "echo-message")
 		, batchcmd(this, *this)
-		, stateext(this, "ircv3-multiline", ExtensionType::USER, false)
+		, userext(this, "ircv3-multiline", ExtensionType::USER, false)
 		, moderatedmode(this, "moderated")
 		, noextmsgmode(this, "noextmsg")
 		, batchev(this, "BATCH")
@@ -236,7 +254,56 @@ public:
 		const auto& tag = ServerInstance->Config->ConfValue("ircv3multiline");
 		maxlines = tag->getNum<size_t>("maxlines", 20, 1, 500);
 		maxbytes = tag->getNum<size_t>("maxbytes", 40000, 256, 1000000);
+		batchtimeout = tag->getDuration("batchtimeout", 30, 5, 300);
+		maxbatchesperminute = tag->getNum<size_t>("maxbatchesperminute", 10, 0, 120);
 		cap.SetValueString(INSP_FORMAT("max-bytes={},max-lines={}", maxbytes, maxlines));
+	}
+
+	bool Tick() override
+	{
+		if (!batchtimeout)
+			return true;
+
+		const time_t now = ServerInstance->Time();
+		for (auto* user : ServerInstance->Users.GetLocalUsers())
+		{
+			MultilineUserExt& data = userext.GetRef(user);
+			if (!data.batch.active || !data.batch_opened)
+				continue;
+			if (static_cast<unsigned long>(now - data.batch_opened) > batchtimeout)
+				AbortBatch(user, data, "MULTILINE_INVALID", data.batch.target, "Multiline batch timed out");
+		}
+		return true;
+	}
+
+	void PruneCompletions(MultilineUserExt& data) const
+	{
+		const time_t cutoff = ServerInstance->Time() - 60;
+		while (!data.completions.empty() && data.completions.front() < cutoff)
+			data.completions.pop_front();
+	}
+
+	bool RateLimitExceeded(MultilineUserExt& data) const
+	{
+		if (!maxbatchesperminute)
+			return false;
+		PruneCompletions(data);
+		return data.completions.size() >= maxbatchesperminute;
+	}
+
+	void RecordCompletion(MultilineUserExt& data)
+	{
+		if (!maxbatchesperminute)
+			return;
+		data.completions.push_back(ServerInstance->Time());
+		PruneCompletions(data);
+	}
+
+	bool BatchTimedOut(const MultilineUserExt& data) const
+	{
+		if (!batchtimeout || !data.batch.active || !data.batch_opened)
+			return false;
+		return static_cast<unsigned long>(ServerInstance->Time() - data.batch_opened) > batchtimeout;
 	}
 
 	void init() override
@@ -283,11 +350,11 @@ public:
 		fail.Send(user, &batchcmd, code, context, desc);
 	}
 
-	void AbortBatch(LocalUser* user, MultilineBatchState& state, const std::string& code,
+	void AbortBatch(LocalUser* user, MultilineUserExt& data, const std::string& code,
 		const std::string& context, const std::string& desc)
 	{
 		FailBatch(user, code, context, desc);
-		state.Reset();
+		data.ResetBatch();
 	}
 
 	bool ChannelMaySend(User* user, Channel* chan, std::string& err) const
@@ -320,12 +387,19 @@ public:
 	}
 
 	bool CollectLine(LocalUser* user, User* source, MessageTarget& target, MessageDetails& details,
-		MultilineBatchState& state)
+		MultilineUserExt& data)
 	{
+		MultilineBatchState& state = data.batch;
+		if (BatchTimedOut(data))
+		{
+			AbortBatch(user, data, "MULTILINE_INVALID", state.target, "Multiline batch timed out");
+			return false;
+		}
+
 		std::string_view ctcp;
 		if (details.IsCTCP(ctcp))
 		{
-			AbortBatch(user, state, "MULTILINE_INVALID", state.target, "Invalid multiline batch");
+			AbortBatch(user, data, "MULTILINE_INVALID", state.target, "Invalid multiline batch");
 			return false;
 		}
 
@@ -336,13 +410,13 @@ public:
 		}
 		else if (state.cmd != details.type)
 		{
-			AbortBatch(user, state, "MULTILINE_INVALID", state.target, "Invalid multiline batch");
+			AbortBatch(user, data, "MULTILINE_INVALID", state.target, "Invalid multiline batch");
 			return false;
 		}
 
 		if (!irc::equals(target.GetName(), state.target))
 		{
-			AbortBatch(user, state, "MULTILINE_INVALID_TARGET", state.target, "Invalid multiline target");
+			AbortBatch(user, data, "MULTILINE_INVALID_TARGET", state.target, "Invalid multiline target");
 			return false;
 		}
 
@@ -350,7 +424,7 @@ public:
 		{
 			if (!AllowedLineTag(key))
 			{
-				AbortBatch(user, state, "MULTILINE_INVALID", state.target, "Invalid multiline batch");
+				AbortBatch(user, data, "MULTILINE_INVALID", state.target, "Invalid multiline batch");
 				return false;
 			}
 		}
@@ -358,7 +432,7 @@ public:
 		const bool concat = details.tags_in.find(CONCAT_TAG) != details.tags_in.end();
 		if (concat && details.text.empty())
 		{
-			AbortBatch(user, state, "MULTILINE_INVALID", state.target, "Invalid multiline batch with concatenated blank line");
+			AbortBatch(user, data, "MULTILINE_INVALID", state.target, "Invalid multiline batch with concatenated blank line");
 			return false;
 		}
 
@@ -369,7 +443,7 @@ public:
 			{
 				if (!err.empty())
 					source->WriteNumeric(Numerics::CannotSendTo(target.Get<Channel>(), err, *moderatedmode));
-				state.Reset();
+				data.ResetBatch();
 				return false;
 			}
 		}
@@ -380,9 +454,9 @@ public:
 		if (state.lines.size() >= maxlines || state.content_bytes + add_bytes > maxbytes)
 		{
 			if (state.lines.size() >= maxlines)
-				AbortBatch(user, state, "MULTILINE_MAX_LINES", ConvToStr(maxlines), "Multiline batch max-lines exceeded");
+				AbortBatch(user, data, "MULTILINE_MAX_LINES", ConvToStr(maxlines), "Multiline batch max-lines exceeded");
 			else
-				AbortBatch(user, state, "MULTILINE_MAX_BYTES", ConvToStr(maxbytes), "Multiline batch max-bytes exceeded");
+				AbortBatch(user, data, "MULTILINE_MAX_BYTES", ConvToStr(maxbytes), "Multiline batch max-bytes exceeded");
 			return false;
 		}
 
@@ -548,23 +622,31 @@ public:
 		return any_nonblank;
 	}
 
-	CmdResult EndBatch(LocalUser* user, MultilineBatchState& state, const std::string& ref)
+	CmdResult EndBatch(LocalUser* user, MultilineUserExt& data, const std::string& ref)
 	{
+		MultilineBatchState& state = data.batch;
 		if (!state.active || state.ref != ref)
 		{
 			FailBatch(user, "MULTILINE_INVALID", ref, "Invalid multiline batch");
-			state.Reset();
+			data.ResetBatch();
+			return CmdResult::FAILURE;
+		}
+
+		if (BatchTimedOut(data))
+		{
+			AbortBatch(user, data, "MULTILINE_INVALID", state.target, "Multiline batch timed out");
 			return CmdResult::FAILURE;
 		}
 
 		if (!ValidBatch(state))
 		{
-			AbortBatch(user, state, "MULTILINE_INVALID", state.target, "Invalid multiline batch with blank lines only");
+			AbortBatch(user, data, "MULTILINE_INVALID", state.target, "Invalid multiline batch with blank lines only");
 			return CmdResult::FAILURE;
 		}
 
 		Deliver(user, state);
-		state.Reset();
+		RecordCompletion(data);
+		data.ResetBatch();
 		return CmdResult::SUCCESS;
 	}
 
@@ -589,10 +671,17 @@ public:
 			return CmdResult::FAILURE;
 		}
 
-		MultilineBatchState& state = stateext.GetRef(user);
-		if (state.active)
+		MultilineUserExt& data = userext.GetRef(user);
+		if (data.batch.active)
 		{
 			FailBatch(user, "MULTILINE_INVALID", ref, "Invalid multiline batch");
+			return CmdResult::FAILURE;
+		}
+
+		if (RateLimitExceeded(data))
+		{
+			FailBatch(user, "MULTILINE_INVALID", ref,
+				INSP_FORMAT("Multiline rate limit exceeded (max {} batches per minute)", maxbatchesperminute));
 			return CmdResult::FAILURE;
 		}
 
@@ -624,14 +713,15 @@ public:
 			return CmdResult::FAILURE;
 		}
 
-		state.Reset();
-		state.active = true;
-		state.ref = ref;
-		state.target = target;
-		state.batch_tags = tags;
+		data.ResetBatch();
+		data.batch.active = true;
+		data.batch.ref = ref;
+		data.batch.target = target;
+		data.batch.batch_tags = tags;
+		data.batch_opened = ServerInstance->Time();
 		auto labelit = tags.find("label");
 		if (labelit != tags.end())
-			state.label = labelit->second.value;
+			data.batch.label = labelit->second.value;
 		return CmdResult::SUCCESS;
 	}
 
@@ -641,15 +731,15 @@ public:
 		if (!luser)
 			return MOD_RES_PASSTHRU;
 
-		MultilineBatchState& state = stateext.GetRef(luser);
-		if (!state.active)
+		MultilineUserExt& data = userext.GetRef(luser);
+		if (!data.batch.active)
 			return MOD_RES_PASSTHRU;
 
 		auto bit = details.tags_in.find("batch");
-		if (bit == details.tags_in.end() || bit->second.value != state.ref)
+		if (bit == details.tags_in.end() || bit->second.value != data.batch.ref)
 			return MOD_RES_PASSTHRU;
 
-		if (!CollectLine(luser, user, target, details, state))
+		if (!CollectLine(luser, user, target, details, data))
 			return MOD_RES_DENY;
 
 		details.echo = false;
@@ -658,7 +748,7 @@ public:
 
 	void OnUserDisconnect(LocalUser* user) override
 	{
-		stateext.GetRef(user).Reset();
+		userext.GetRef(user).ResetBatch();
 	}
 };
 
@@ -683,10 +773,10 @@ CmdResult CommandBatch::HandleLocal(LocalUser* user, const Params& parameters)
 		return CmdResult::FAILURE;
 
 	const std::string ref = token.substr(1);
-	MultilineBatchState& state = mod.stateext.GetRef(user);
+	MultilineUserExt& data = mod.userext.GetRef(user);
 
 	if (end)
-		return mod.EndBatch(user, state, ref);
+		return mod.EndBatch(user, data, ref);
 
 	if (parameters.size() < 3)
 	{

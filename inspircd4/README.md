@@ -308,7 +308,7 @@ Compatible avec **Orbit** : collage multi-ligne → `BATCH +… draft/multiline 
 <module name="ircv3_msgid">
 <module name="ircv3_multiline">
 
-<ircv3multiline maxlines="20" maxbytes="40000">
+<ircv3multiline maxlines="20" maxbytes="40000" batchtimeout="30s" maxbatchesperminute="10">
 ```
 
 ## Configuration
@@ -317,6 +317,8 @@ Compatible avec **Orbit** : collage multi-ligne → `BATCH +… draft/multiline 
 |---|---|---|
 | `maxlines` | 20 | Plafond de lignes `PRIVMSG`/`NOTICE` par batch (CAP `max-lines`) |
 | `maxbytes` | 40000 | Taille totale du texte concaténé (CAP `max-bytes`, LF inclus) |
+| `batchtimeout` | 30s | Ferme un batch ouvert sans `BATCH -` (timer 5 s) |
+| `maxbatchesperminute` | 10 | Plafond de batches **envoyés** par utilisateur et par minute (`0` = désactivé) |
 
 Annonce `draft/multiline=max-bytes=…,max-lines=…` en CAP LS.
 
