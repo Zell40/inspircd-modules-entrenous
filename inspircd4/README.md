@@ -292,6 +292,49 @@ Compatible avec **Orbit** (`MARKREAD #chan timestamp=<ISO>`).
 
 ---
 
+# m_ircv3_multiline
+
+Module extra pour [draft/multiline](https://ircv3.net/specs/extensions/multiline) : envoi client de messages multi-lignes dans un batch `draft/multiline`.
+
+Compatible avec **Orbit** : collage multi-ligne → `BATCH +… draft/multiline <cible>`, lignes `PRIVMSG` taguées `@batch=…` (+ `draft/multiline-concat` si coupure 512), `BATCH -…`. Nécessite aussi la cap `batch` (`ircv3_batch`).
+
+## Installation
+
+```xml
+<module name="cap">
+<module name="ircv3">
+<module name="ircv3_batch">
+<module name="ircv3_servertime">
+<module name="ircv3_msgid">
+<module name="ircv3_multiline">
+
+<ircv3multiline maxlines="20" maxbytes="40000">
+```
+
+## Configuration
+
+| Attribut | Défaut | Effet |
+|---|---|---|
+| `maxlines` | 20 | Plafond de lignes `PRIVMSG`/`NOTICE` par batch (CAP `max-lines`) |
+| `maxbytes` | 40000 | Taille totale du texte concaténé (CAP `max-bytes`, LF inclus) |
+
+Annonce `draft/multiline=max-bytes=…,max-lines=…` en CAP LS.
+
+Les clients sans `draft/multiline` reçoivent un **fallback** : plusieurs `PRIVMSG` séparés (lignes vides omises), tags `msgid`/`account` sur la première ligne.
+
+Avec `echo-message`, l’expéditeur reçoit le batch en écho (tag `inspircd.org/echo`).
+
+Erreurs : `FAIL BATCH MULTILINE_*` (standard-replies).
+
+## Dépendances
+
+- `cap`
+- `ircv3_batch` (**obligatoire** pour Orbit)
+- `ircv3_servertime` recommandé (`time` sur le `BATCH` d’ouverture)
+- `message-tags` / `ircv3_ctctags` pour `+draft/channel-context` (MP contextualisés Orbit)
+
+---
+
 # m_ircv3_webpush
 
 Module extra pour l’extension IRCv3 [Web Push](https://github.com/ircv3/ircv3-specifications/pull/471) (vendored `soju.im/webpush`, aussi annoncé comme `draft/webpush`). Compatible avec les clients type Goguma.
