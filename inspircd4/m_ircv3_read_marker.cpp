@@ -34,22 +34,31 @@
 #include <fstream>
 #include <map>
 
+class ModuleIRCv3ReadMarker;
+
 class DraftCap final
 	: public Cap::Capability
 {
+	ModuleIRCv3ReadMarker& mod;
+
 	bool OnList(LocalUser* user) override
 	{
-		return GetProtocol(user) != Cap::CAP_LEGACY;
+		if (GetProtocol(user) == Cap::CAP_LEGACY)
+			return false;
+		return mod.CapVisibleTo(user);
 	}
 
 	bool OnRequest(LocalUser* user, bool adding) override
 	{
+		if (!adding)
+			return GetProtocol(user) != Cap::CAP_LEGACY;
 		return OnList(user);
 	}
 
 public:
-	DraftCap(Module* mod, const std::string& capname)
+	DraftCap(ModuleIRCv3ReadMarker* mod, const std::string& capname)
 		: Cap::Capability(mod, capname)
+		, mod(*mod)
 	{
 	}
 };
@@ -183,6 +192,21 @@ public:
 		return true;
 	}
 
+	bool UserHasAccount(User* user) const
+	{
+		if (!accountapi)
+			return false;
+		const std::string* acct = accountapi->GetAccountName(user);
+		return acct && !acct->empty();
+	}
+
+	bool CapVisibleTo(LocalUser* user) const
+	{
+		if (!requireaccount)
+			return true;
+		return UserHasAccount(user);
+	}
+
 	std::string OwnerKey(User* user) const
 	{
 		if (accountapi)
@@ -235,10 +259,11 @@ public:
 
 	CmdResult HandleSet(LocalUser* user, const std::string& target, time_t ts, long ms)
 	{
-		if (requireaccount && (!accountapi || !accountapi->GetAccountName(user)))
+		if (requireaccount && !UserHasAccount(user))
 		{
-			fail.Send(user, &cmd, "INTERNAL_ERROR", target, "You must be logged in to set read markers");
-			return CmdResult::FAILURE;
+			// Cap should not be enabled without an account; ignore rather than FAIL
+			// (Orbit sends MARKREAD as soon as the cap is ACK'd, often before SASL).
+			return CmdResult::SUCCESS;
 		}
 
 		const std::string owner = OwnerKey(user);
@@ -286,18 +311,28 @@ public:
 
 	void OnAccountChange(User* user, const std::string& account) override
 	{
+		LocalUser* luser = IS_LOCAL(user);
 		if (account.empty())
-			return;
-		auto nickit = store.find(user->nick);
-		if (nickit == store.end())
-			return;
-		auto& acctmap = store[account];
-		if (acctmap.empty())
 		{
-			acctmap = std::move(nickit->second);
-			store.erase(nickit);
-			dirty = true;
+			if (luser && cap.IsEnabled(luser))
+				cap.Set(luser, false);
+			return;
 		}
+
+		auto nickit = store.find(user->nick);
+		if (nickit != store.end())
+		{
+			auto& acctmap = store[account];
+			if (acctmap.empty())
+			{
+				acctmap = std::move(nickit->second);
+				store.erase(nickit);
+				dirty = true;
+			}
+		}
+
+		if (requireaccount)
+			cap.NotifyValueChange();
 	}
 
 	void LoadStore()

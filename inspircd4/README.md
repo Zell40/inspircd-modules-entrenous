@@ -281,7 +281,7 @@ Compatible avec **Orbit** (`MARKREAD #chan timestamp=<ISO>`).
 
 | Attribut | Défaut | Effet |
 |---|---|---|
-| `requireaccount` | yes | Exiger un login pour SET |
+| `requireaccount` | yes | Exiger un login pour `MARKREAD` SET ; la cap n’est listée qu’aux utilisateurs identifiés (CAP NEW après SASL si `cap-notify`) |
 | `persistfile` | `ircv3-readmarker.db` | Persistance disque |
 | `saveperiod` | 30s | Fréquence d’écriture |
 
