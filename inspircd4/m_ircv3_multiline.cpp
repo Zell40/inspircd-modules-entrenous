@@ -497,7 +497,7 @@ public:
 	}
 
 	void SendFallback(LocalUser* dest, User* source, const std::string& targetname, MessageType type,
-		char status, const MultilineBatchState& state, const std::string& msgid, bool echo)
+		const MultilineBatchState& state, const std::string& msgid, bool echo)
 	{
 		bool msgid_sent = false;
 		for (const MultilineLine& line : state.lines)
@@ -506,7 +506,7 @@ public:
 				continue;
 
 			ClientProtocol::Messages::Privmsg msg(ClientProtocol::Messages::Privmsg::nocopy,
-				source, targetname, line.text, type, status);
+				source, targetname, line.text, type);
 			if (!msgid_sent)
 			{
 				if (!msgid.empty())
@@ -520,12 +520,12 @@ public:
 	}
 
 	void SendBatch(LocalUser* dest, User* source, const std::string& targetname, MessageType type,
-		char status, const MultilineBatchState& state, const std::string& msgid, bool echo)
+		const MultilineBatchState& state, const std::string& msgid, bool echo)
 	{
 		IRCv3::Batch::Batch batch(BATCH_TYPE);
 		if (!batchmanager || !batchcap.IsEnabled(dest))
 		{
-			SendFallback(dest, source, targetname, type, status, state, msgid, echo);
+			SendFallback(dest, source, targetname, type, state, msgid, echo);
 			return;
 		}
 
@@ -539,7 +539,7 @@ public:
 		for (const MultilineLine& line : state.lines)
 		{
 			ClientProtocol::Messages::Privmsg msg(ClientProtocol::Messages::Privmsg::nocopy,
-				source, targetname, line.text, type, status);
+				source, targetname, line.text, type);
 			if (line.concat)
 				msg.AddTag(CONCAT_TAG, &concat_tag, "");
 			if (echo)
@@ -575,11 +575,11 @@ public:
 				LocalUser* dest = IS_LOCAL(member);
 				if (!dest || except.count(member))
 					continue;
-				SendBatch(dest, source, chan->name, state.cmd, 0, state, msgid, false);
+				SendBatch(dest, source, chan->name, state.cmd, state, msgid, false);
 			}
 
 			if (echo)
-				SendBatch(lsource, source, chan->name, state.cmd, 0, state, msgid, true);
+				SendBatch(lsource, source, chan->name, state.cmd, state, msgid, true);
 
 			MessageTarget msgtarget(chan, 0);
 			MultilineMessageDetails postdetails(state.cmd, merged, tags_out);
@@ -596,10 +596,10 @@ public:
 		const std::string display = pmctx.empty() ? destuser->nick : pmctx;
 		LocalUser* ldest = IS_LOCAL(destuser);
 		if (ldest)
-			SendBatch(ldest, source, display, state.cmd, 0, state, msgid, false);
+			SendBatch(ldest, source, display, state.cmd, state, msgid, false);
 
 		if (echo)
-			SendBatch(lsource, source, display, state.cmd, 0, state, msgid, true);
+			SendBatch(lsource, source, display, state.cmd, state, msgid, true);
 
 		MessageTarget msgtarget(destuser);
 		MultilineMessageDetails postdetails(state.cmd, merged, tags_out);
