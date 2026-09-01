@@ -109,10 +109,9 @@ Stockage local (fichier data), clé = **compte** SASL si connecté, sinon nick. 
 
 ## Installation
 
-1. Copier `m_ircv3_metadata.cpp` dans `src/modules/` de ton arbre InspIRCd 4.
-2. Copier `ircv3_metadata.h` dans `include/modules/` (API pour `m_ircv3_webpush`).
-3. Recompiler (`make`).
-4. Charger **après** `cap` (et `account` / `monitor` recommandés) :
+1. Copier `m_ircv3_metadata.cpp` **et** le dossier `m_ircv3_webpush/` (au moins pour `ircv3_metadata.h`) dans `src/modules/`. Rien à ajouter dans `include/modules/`.
+2. Recompiler (`make`).
+3. Charger **après** `cap` (et `account` / `monitor` recommandés) :
 
 ```xml
 <module name="cap">
@@ -159,7 +158,7 @@ METADATA #salon SET soju.im/muted
 METADATA #salon GET soju.im/muted
 ```
 
-API C++ (`include/modules/ircv3_metadata.h`) : `IRCv3Metadata::API` expose `IsMuted` / `IsMutedOwner` / `IsBlocked` pour d’autres modules (webpush).
+API C++ (`m_ircv3_webpush/ircv3_metadata.h`) : `IRCv3Metadata::API` expose `IsMuted` / `IsMutedOwner` / `IsBlocked` pour webpush (et d’éventuels autres modules sous `src/modules/`).
 ## Dépendances
 
 - `cap` (obligatoire pour annoncer les caps)
@@ -360,10 +359,9 @@ InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que 
 
 Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les certificats CA système doivent être installés pour valider le TLS des endpoints (FCM, Mozilla autopush, etc.).
 
-1. Copier le dossier `m_ircv3_webpush/` entier dans `src/modules/` de ton arbre InspIRCd 4 (une seule entrée, comme `m_spanningtree`).
-2. Copier `ircv3_metadata.h` dans `include/modules/` (si pas déjà fait avec le module metadata).
-3. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` de `main.cpp`.
-4. Charger **après** `cap`, `account` (si `requireaccount="yes"`), et de préférence **`ircv3_metadata`** (mute salon → pas de push) :
+1. Copier le dossier `m_ircv3_webpush/` entier dans `src/modules/` (comme `m_spanningtree`). L’API mute (`ircv3_metadata.h`) est **dans ce dossier** — pas dans `include/modules/`.
+2. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` de `main.cpp`.
+3. Charger **après** `cap`, `account` (si `requireaccount="yes"`), et de préférence **`ircv3_metadata`** (mute salon → pas de push) :
 
 ```xml
 <module name="cap">

@@ -2,7 +2,8 @@
  * InspIRCd -- Internet Relay Chat Daemon
  *
  * API for m_ircv3_metadata (per-user buffer prefs: soju.im/muted, …).
- * Copy this file into include/modules/ when installing the module.
+ * Lives next to m_ircv3_webpush so install stays under src/modules/ only
+ * (no copy into InspIRCd include/modules/).
  *
  * Copyright (C) 2026
  *

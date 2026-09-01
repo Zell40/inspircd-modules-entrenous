@@ -35,7 +35,7 @@
 #include "inspircd.h"
 #include "modules/account.h"
 #include "modules/cap.h"
-#include "modules/ircv3_metadata.h"
+#include "ircv3_metadata.h"
 #include "modules/ircv3_replies.h"
 #include "modules/ircv3_servertime.h"
 #include "modules/isupport.h"

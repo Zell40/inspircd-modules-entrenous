@@ -11,7 +11,7 @@ Ce dépôt n’est pas un fork d’InspIRCd : chaque module se copie dans `src/m
 | [`inspircd4/m_account_registration.cpp`](inspircd4/m_account_registration.cpp) | Cap IRCv3 `draft/account-registration` (`REGISTER` / `VERIFY`) |
 | [`inspircd4/m_ircv3_webpush/`](inspircd4/m_ircv3_webpush/) | Caps IRCv3 `soju.im/webpush` / `draft/webpush` (`WEBPUSH`) |
 | [`inspircd4/m_ircv3_metadata.cpp`](inspircd4/m_ircv3_metadata.cpp) | Caps IRCv3 `draft/metadata-2` / `draft/metadata-3` (`METADATA`, dont `soju.im/muted`) |
-| [`inspircd4/ircv3_metadata.h`](inspircd4/ircv3_metadata.h) | API C++ `IRCv3Metadata::API` (à copier dans `include/modules/`) |
+| [`inspircd4/m_ircv3_webpush/ircv3_metadata.h`](inspircd4/m_ircv3_webpush/ircv3_metadata.h) | API C++ `IRCv3Metadata::API` (dans le dossier webpush, pas dans `include/modules/`) |
 | [`inspircd4/m_ircv3_chathistory.cpp`](inspircd4/m_ircv3_chathistory.cpp) | Caps IRCv3 `draft/chathistory` + `draft/event-playback` (`CHATHISTORY`, dont `CLEAR`) |
 | [`inspircd4/m_ircv3_read_marker.cpp`](inspircd4/m_ircv3_read_marker.cpp) | Cap IRCv3 `draft/read-marker` (`MARKREAD`) |
 | [`inspircd4/m_ircv3_multiline.cpp`](inspircd4/m_ircv3_multiline.cpp) | Cap IRCv3 `draft/multiline` (messages multi-lignes en batch) |

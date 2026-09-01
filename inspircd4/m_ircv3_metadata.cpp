@@ -29,7 +29,7 @@
 #include "modules/account.h"
 #include "modules/cap.h"
 #include "modules/ircv3_replies.h"
-#include "modules/ircv3_metadata.h"
+#include "m_ircv3_webpush/ircv3_metadata.h"
 #include "modules/monitor.h"
 #include "modules/whois.h"
 
