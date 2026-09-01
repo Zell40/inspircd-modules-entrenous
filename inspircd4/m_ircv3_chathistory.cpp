@@ -20,7 +20,7 @@
  */
 
 /// $ModAuthor: Entre Nous IRCv3 port
-/// $ModConfig: <ircv3chathistory maxlines="500" maxduration="7d" maxquery="50" savepms="yes" savebots="yes" saveevents="yes" clearminrank="op" allowselfpmclear="yes">
+/// $ModConfig: <ircv3chathistory maxlines="500" maxduration="7d" maxquery="50" savepms="yes" savebots="yes" saveevents="yes" saveusermodes="yes" clearminrank="op" allowselfpmclear="yes">
 /// $ModDesc: Provides IRCv3 draft/chathistory and draft/event-playback (CHATHISTORY).
 /// $ModDepends: core 4
 
@@ -228,6 +228,7 @@ public:
 	bool savepms = true;
 	bool savebots = true;
 	bool saveevents = true;
+	bool saveusermodes = true;
 	bool allowselfpmclear = true;
 	ModeHandler::Rank clearminrank = OP_VALUE;
 
@@ -281,6 +282,7 @@ public:
 		savepms = tag->getBool("savepms", true);
 		savebots = tag->getBool("savebots", true);
 		saveevents = tag->getBool("saveevents", true);
+		saveusermodes = tag->getBool("saveusermodes", true);
 		allowselfpmclear = tag->getBool("allowselfpmclear", true);
 		clearminrank = RankFromName(tag->getString("clearminrank", "op"));
 		if (clearminrank == 0)
@@ -422,12 +424,53 @@ public:
 		return false;
 	}
 
+	static bool ChangeListIsPrefixModesOnly(const Modes::ChangeList& changelist)
+	{
+		bool any = false;
+		for (const auto& change : changelist.getlist())
+		{
+			any = true;
+			if (!change.mh->IsPrefixMode())
+				return false;
+		}
+		return any;
+	}
+
+	bool IsStoredPrefixModeOnly(const HistoryItem& item) const
+	{
+		if (!item.is_event || !irc::equals(item.command, "MODE") || item.eparams.size() < 2)
+			return false;
+		const std::string& modestr = item.eparams[1];
+		bool any = false;
+		for (unsigned char c : modestr)
+		{
+			if (c == '+' || c == '-')
+				continue;
+			any = true;
+			ModeHandler* mh = ServerInstance->Modes.FindMode(static_cast<char>(c), MODETYPE_CHANNEL);
+			if (!mh || !mh->IsPrefixMode())
+				return false;
+		}
+		return any;
+	}
+
+	bool IncludeHistoryItem(const HistoryItem& item, bool want_events) const
+	{
+		if (!item.is_event)
+			return true;
+		if (!want_events)
+			return false;
+		if (!saveusermodes && IsStoredPrefixModeOnly(item))
+			return false;
+		return true;
+	}
+
 	void CollectLatest(const HistoryList& list, size_t limit, time_t after_ts, long after_ms,
 		bool have_after, bool want_events, std::vector<const HistoryItem*>& out)
 	{
 		for (auto it = list.lines.rbegin(); it != list.lines.rend() && out.size() < limit; ++it)
 		{
-			if (it->is_event && !want_events)
+			if (!IncludeHistoryItem(*it, want_events))
 				continue;
 			if (have_after && !it->LaterThan(after_ts, after_ms))
 				continue;
@@ -441,7 +484,7 @@ public:
 	{
 		for (auto it = list.lines.rbegin(); it != list.lines.rend() && out.size() < limit; ++it)
 		{
-			if (it->is_event && !want_events)
+			if (!IncludeHistoryItem(*it, want_events))
 				continue;
 			if (!it->EarlierThan(before_ts, before_ms))
 				continue;
@@ -455,7 +498,7 @@ public:
 	{
 		for (const auto& item : list.lines)
 		{
-			if (item.is_event && !want_events)
+			if (!IncludeHistoryItem(item, want_events))
 				continue;
 			if (!item.LaterThan(after_ts, after_ms))
 				continue;
@@ -608,7 +651,7 @@ public:
 			items = before;
 			for (const auto& item : list->lines)
 			{
-				if (item.is_event && !want_events)
+				if (!IncludeHistoryItem(item, want_events))
 					continue;
 				if (item.ts == cts && item.ms == cms)
 				{
@@ -658,7 +701,7 @@ public:
 			{
 				for (const auto& item : list->lines)
 				{
-					if (item.is_event && !want_events)
+					if (!IncludeHistoryItem(item, want_events))
 						continue;
 					if (!item.LaterThan(t1, m1))
 						continue;
@@ -673,7 +716,7 @@ public:
 			{
 				for (auto it = list->lines.rbegin(); it != list->lines.rend() && items.size() < limit; ++it)
 				{
-					if (it->is_event && !want_events)
+					if (!IncludeHistoryItem(*it, want_events))
 						continue;
 					if (!it->EarlierThan(t1, m1))
 						continue;
@@ -887,7 +930,11 @@ public:
 	void OnMode(User* user, User* usertarget, Channel* chantarget, const Modes::ChangeList& changelist,
 		ModeParser::ModeProcessFlag processflags) override
 	{
+		(void)usertarget;
+		(void)processflags;
 		if (!chantarget || !saveevents)
+			return;
+		if (!saveusermodes && ChangeListIsPrefixModesOnly(changelist))
 			return;
 
 		std::string modes;
