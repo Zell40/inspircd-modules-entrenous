@@ -207,6 +207,19 @@ Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels
     allowselfpmclear="yes">
 ```
 
+**Important — déploiement du binaire :** `/rehash` relit la config mais **ne recharge pas** le fichier `.so` du module. Après `make install`, il faut **redémarrer InspIRCd** ou, en IRCop : `/RELOADMODULE ircv3_chathistory`. Sans ça, une ancienne version du module tourne encore (pas de log `saveusermodes`, filtre ignoré).
+
+Les tags InspIRCd sont **plats** (pas de balises XML imbriquées) : `<module name="…">` et `<ircv3chathistory …>` sont deux lignes distinctes, pas un bloc `<module>…</module>`.
+
+**Vérification au démarrage / reload** (dans `logs/inspircd.log`) :
+
+```
+Entre Nous IRCv3 chathistory loaded (saveusermodes supported)
+ircv3chathistory: saveusermodes=no
+```
+
+Si la première ligne est absente, le mauvais module (ou une vieille build) est chargé. Si la seconde affiche `yes` alors que la config dit `no`, le tag `<ircv3chathistory>` n’est pas lu (emplacement ou syntaxe).
+
 ## Configuration
 
 | Attribut | Défaut | Effet |
@@ -217,7 +230,7 @@ Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels
 | `savepms` | yes | Historique des messages privés |
 | `savebots` | yes | Enregistrer les messages des umode `+B` |
 | `saveevents` | yes | Stocker JOIN/PART/… pour `draft/event-playback` |
-| `saveusermodes` | yes | Stocker les MODE préfixe utilisateur (+o, +v, +h, …) dans l’historique ; `no` les exclut du stockage, du rejeu, et purge ceux déjà en mémoire au `/rehash` |
+| `saveusermodes` | yes | Stocker les MODE préfixe utilisateur (+o, +v, +h, …) dans l’historique ; `no` les exclut du stockage, du rejeu, et purge ceux déjà en mémoire au rehash/reload. **Ne masque pas** les MODE **en direct** (Orbit : paramètre « Masquer les changements de mode ») |
 | `clearminrank` | `op` | Rang canal minimum pour `CHATHISTORY CLEAR #chan` (`voice` / `halfop` / `op` / `admin` / `founder`, lettre, ou rang numérique) |
 | `allowselfpmclear` | yes | Un utilisateur peut `CLEAR` l’historique de **sa** conversation privée avec un nick |
 
@@ -346,14 +359,15 @@ Erreurs : `FAIL BATCH MULTILINE_*` (standard-replies).
 
 # m_ircv3_webpush
 
-Module extra pour l’extension IRCv3 [Web Push](https://github.com/ircv3/ircv3-specifications/pull/471) (vendored `soju.im/webpush`, aussi annoncé comme `draft/webpush`). Compatible avec les clients type Goguma.
+Module extra pour l’extension IRCv3 [Web Push](https://github.com/ircv3/ircv3-specifications/pull/471) (vendored `soju.im/webpush`, aussi annoncé comme `draft/webpush`). Compatible avec **Orbit** (navigateur) et des clients mobiles type Goguma.
 
 Le module :
 
-- annonce les caps et le token ISUPPORT `VAPID` (clé publique P-256, RFC 8292) ;
+- annonce les caps `soju.im/webpush` et `draft/webpush`, plus le token ISUPPORT `VAPID` (clé publique P-256, RFC 8292) ;
 - implémente `WEBPUSH REGISTER <endpoint> <keys>` et `WEBPUSH UNREGISTER <endpoint>` ;
-- chiffre le payload en **aes128gcm** (RFC 8291) et POSTe en HTTPS vers l’endpoint ;
-- refuse les URL non-`https` et les adresses privées / loopback (protection SSRF, comme soju/Ergo).
+- chiffre le payload en **aes128gcm** (RFC 8291) et POSTe en HTTPS vers l’endpoint push ;
+- refuse les URL non-`https` et les adresses privées / loopback (protection SSRF, comme soju/Ergo) ;
+- envoie le payload comme **une ligne IRC** (tags `time`, `msgid`, `account` si présents) pour que le client puisse réinjecter l’événement.
 
 InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que si **une session du compte est encore connectée** (ou away). Les MP vers le dernier nick d’un compte déconnecté peuvent encore déclencher un push (`pushoffline`).
 
@@ -361,14 +375,15 @@ InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que 
 
 Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les certificats CA système doivent être installés pour valider le TLS des endpoints (FCM, Mozilla autopush, etc.).
 
-1. Copier le dossier `m_ircv3_webpush/` entier dans `src/modules/` (comme `m_spanningtree`). L’API mute (`ircv3_metadata.h`) est **dans ce dossier** — pas dans `include/modules/`.
+1. Copier le dossier `m_ircv3_webpush/` entier dans `src/modules/` (comme `m_spanningtree`). L’API metadata (`ircv3_metadata.h`) est **dans ce dossier** — pas dans `include/modules/`.
 2. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` de `main.cpp`.
-3. Charger **après** `cap`, `account` (si `requireaccount="yes"`), et de préférence **`ircv3_metadata`** (mute salon → pas de push) :
+3. Charger **après** `cap`, `account` (si `requireaccount="yes"`), et de préférence **`ircv3_metadata`** (sourdine salon → pas de push) :
 
 ```xml
 <module name="cap">
 <module name="account">
 <module name="ircv3">
+<module name="ircv3_servertime">
 <module name="ircv3_metadata">
 <module name="ircv3_webpush">
 
@@ -384,7 +399,9 @@ Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les cer
     pushoffline="yes"
     pushalways="no"
     testonregister="yes"
-    httptimeout="15s">
+    httptimeout="15s"
+    maxperminute="30"
+    saveperiod="30s">
 ```
 
 Au premier démarrage, une paire de clés VAPID est générée dans `vapidfile` (répertoire data d’InspIRCd). **Garde ce fichier** : changer la clé publique casse les abonnements existants.
@@ -410,19 +427,66 @@ Au premier démarrage, une paire de clés VAPID est générée dans `vapidfile` 
 
 Les caps ne sont **pas** listées en CAP LS 301. Le client **doit** `CAP REQ soju.im/webpush` (ou `draft/webpush`) avant `WEBPUSH`.
 
-`keys` est au format message-tags : `p256dh=<b64url>;auth=<b64url>`.
+`keys` au format message-tags : `p256dh=<b64url>;auth=<b64url>`.
+
+## Commandes
+
+```
+WEBPUSH REGISTER <endpoint> p256dh=<b64url>;auth=<b64url>
+WEBPUSH UNREGISTER <endpoint>
+```
+
+- Abonnements stockés par **compte** (`a:<compte>`) si `requireaccount=yes`, sinon par nick (`n:<nick>`).
+- `REGISTER` associe l’endpoint à la session courante (UUID) pour détecter si le « registrar » est encore en ligne.
+- Réponses serveur : `WEBPUSH REGISTER|UNREGISTER <endpoint>` (echo de confirmation).
+- Erreurs typiques : `NO_CAPABILITY`, `FORBIDDEN` (pas de compte), `INVALID_PARAMS` (URL non-https / clés invalides), `TOO_MANY` (plafond `maxsubscriptions`).
 
 ## Quand un push part
 
-- **PRIVMSG/NOTICE** privé vers un utilisateur local qui a des abonnements, s’il est away, si `pushalways` est actif, ou si plus aucune session « registrar » n’est en ligne — **sauf** si le destinataire a `soju.im/muted=1` (ou `soju.im/blocked=1` sur l’émetteur) via `ircv3_metadata`.
-- **Highlight** (nick, frontières de mot) dans un canal, mêmes conditions — **sauf** canal en sourdine (`METADATA #chan SET soju.im/muted 1`).
-- **INVITE** — **sauf** si le canal invité est en sourdine.
-- **MP offline** : `PRIVMSG`/`NOTICE` vers un nick inexistant qui était le dernier nick d’un compte abonné (`pushoffline`) — respect du mute sur cette cible.
+Un push n’est envoyé que si le destinataire a au moins un abonnement actif et que `ShouldNotifyUser` accepte (voir ci-dessous). Les POST partent d’un **thread dédié** pour ne pas bloquer l’ircd. Un `410`/`404` HTTP retire l’abonnement expiré.
 
-Sans `ircv3_metadata` chargé, le filtrage mute est ignoré (comportement précédent).
-Le payload est **une ligne IRC** sans CRLF, avec tags `time`, `msgid` (si présent) et `account` (si présent). Un `410`/`404` HTTP retire l’abonnement.
+| Événement | Urgence HTTP | Conditions |
+|---|---|---|
+| **PRIVMSG/NOTICE** privé | `high` | Destinataire local avec abonnements ; pas mute/block sur la cible |
+| **Highlight** canal (nick du membre ou son propre nick, frontières de mot) | `normal` | Membre local du canal ; pas `soju.im/muted` sur le salon |
+| **INVITE** | `high` | Invité local ; canal invité non en sourdine |
+| **MP offline** (`pushoffline`) | `high` | Nick inexistant mais dernier nick connu d’un compte abonné ; pas mute sur ce nick |
 
-Les POST partent d’un thread dédié pour ne pas bloquer l’ircd.
+**`ShouldNotifyUser`** (simplifié) :
+
+- `pushalways=yes` → toujours notifier ;
+- sinon, si **aucune** session « registrar » (UUID de l’endpoint) est encore connectée → notifier ;
+- sinon, si `pushaway=yes` et le destinataire est away → notifier ;
+- sinon → pas de push (client encore actif sur le réseau).
+
+Les CTCP (`ACTION` exceptée) ne génèrent pas de push.
+
+## Sourdine et blocage (`ircv3_metadata`)
+
+Avec **`ircv3_metadata`** chargé, le module interroge l’API `ircv3metadataapi` :
+
+| Clé metadata | Effet sur Web Push |
+|---|---|
+| `soju.im/muted=1` sur `#salon` ou nick | Aucun push lié à ce salon / cette conversation MP |
+| `soju.im/blocked=1` sur un nick | Aucun push **depuis** ce nick (MP et highlights) |
+
+Stockage **par compte** (pas partagé entre membres du salon). Sans `ircv3_metadata`, le filtrage mute/block est ignoré.
+
+**Orbit** synchronise la sourdine salon avec le serveur :
+
+- sourdine dans l’UI → `METADATA #chan SET soju.im/muted 1` ;
+- restauration au JOIN → `METADATA #chan GET soju.im/muted` ;
+- le toggle Web Push (paramètres Notifications) enregistre l’endpoint navigateur via `WEBPUSH REGISTER` quand ISUPPORT expose `VAPID` et qu’un compte NickServ est actif.
+
+## Intégration Orbit
+
+1. Le serveur annonce `VAPID=<clé publique b64url>` en ISUPPORT.
+2. Orbit négocie `draft/webpush` (liste dans `caps.ts`).
+3. Après login compte, l’utilisateur active les notifications push dans **Paramètres → Notifications**.
+4. Le navigateur crée une subscription `PushManager` ; Orbit envoie `WEBPUSH REGISTER` avec l’endpoint et les clés.
+5. Les pushes reçus sont des lignes IRC (`:nick!… PRIVMSG …`) que le client peut afficher comme notification desktop.
+
+Prérequis côté navigateur : HTTPS, permission `Notification`, support `PushManager` (pas en iOS Safari standalone classique).
 
 ## Test crypto (RFC 8291)
 
@@ -436,7 +500,10 @@ g++ -O2 -o test_webpush_crypto test_webpush_crypto.cpp -lcrypto
 
 ## Dépendances
 
-- `cap`
-- `account` si `requireaccount="yes"`
+- `cap` (obligatoire pour annoncer les caps)
+- `account` si `requireaccount="yes"` (recommandé pour Orbit)
+- `ircv3_metadata` (recommandé : sourdine salon / blocage nick)
+- `ircv3_servertime` (recommandé : tag `time` sur le payload push)
 - OpenSSL (libcrypto + libssl)
-- Un client Web Push (ex. Goguma)
+- Client Web Push : **Orbit** (web) ou Goguma (mobile)
+

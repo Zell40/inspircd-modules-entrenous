@@ -303,6 +303,8 @@ public:
 
 	void init() override
 	{
+		ServerInstance->Logs.Normal(MODNAME, "Entre Nous IRCv3 chathistory loaded (saveusermodes supported)");
+
 		if (!ServerInstance->Modules.Find("cap"))
 		{
 			ServerInstance->Logs.Normal(MODNAME, "WARNING: the cap module is not loaded! "
