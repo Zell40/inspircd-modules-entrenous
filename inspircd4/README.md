@@ -217,7 +217,7 @@ Stockage **mémoire** (perdu au restart), ring buffer par canal (+ MP optionnels
 | `savepms` | yes | Historique des messages privés |
 | `savebots` | yes | Enregistrer les messages des umode `+B` |
 | `saveevents` | yes | Stocker JOIN/PART/… pour `draft/event-playback` |
-| `saveusermodes` | yes | Stocker les MODE préfixe utilisateur (+o, +v, +h, …) dans l’historique ; `no` les exclut du stockage et du rejeu |
+| `saveusermodes` | yes | Stocker les MODE préfixe utilisateur (+o, +v, +h, …) dans l’historique ; `no` les exclut du stockage, du rejeu, et purge ceux déjà en mémoire au `/rehash` |
 | `clearminrank` | `op` | Rang canal minimum pour `CHATHISTORY CLEAR #chan` (`voice` / `halfop` / `op` / `admin` / `founder`, lettre, ou rang numérique) |
 | `allowselfpmclear` | yes | Un utilisateur peut `CLEAR` l’historique de **sa** conversation privée avec un nick |
 

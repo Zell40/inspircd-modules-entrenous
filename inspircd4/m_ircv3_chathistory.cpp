@@ -287,6 +287,12 @@ public:
 		clearminrank = RankFromName(tag->getString("clearminrank", "op"));
 		if (clearminrank == 0)
 			clearminrank = OP_VALUE;
+
+		if (!saveusermodes)
+			PurgeStoredPrefixModeEvents();
+
+		ServerInstance->Logs.Normal(MODNAME, "ircv3chathistory: saveusermodes={}",
+			saveusermodes ? "yes" : "no");
 	}
 
 	void OnBuildISupport(ISupport::TokenMap& tokens) override
@@ -373,6 +379,9 @@ public:
 
 		for (const HistoryItem* item : items)
 		{
+			if (ShouldSkipPrefixModeEvent(*item))
+				continue;
+
 			if (item->is_event)
 			{
 				ClientProtocol::Message out(item->command.c_str(), item->sourcemask);
@@ -436,22 +445,69 @@ public:
 		return any;
 	}
 
-	bool IsStoredPrefixModeOnly(const HistoryItem& item) const
+	bool BuildStoredModeChangeList(const HistoryItem& item, Modes::ChangeList& changelist) const
 	{
 		if (!item.is_event || !irc::equals(item.command, "MODE") || item.eparams.size() < 2)
 			return false;
-		const std::string& modestr = item.eparams[1];
-		bool any = false;
-		for (unsigned char c : modestr)
+
+		bool adding = true;
+		size_t param_at = 2;
+		for (char modechar : item.eparams[1])
 		{
-			if (c == '+' || c == '-')
+			if (modechar == '+' || modechar == '-')
+			{
+				adding = (modechar == '+');
 				continue;
-			any = true;
-			ModeHandler* mh = ServerInstance->Modes.FindMode(static_cast<char>(c), MODETYPE_CHANNEL);
-			if (!mh || !mh->IsPrefixMode())
+			}
+
+			ModeHandler* mh = ServerInstance->Modes.FindMode(modechar, MODETYPE_CHANNEL);
+			if (!mh)
 				return false;
+
+			std::string parameter;
+			if (mh->NeedsParam(adding) && param_at < item.eparams.size())
+				parameter = item.eparams[param_at++];
+
+			changelist.push(mh, adding, parameter);
 		}
-		return any;
+		return !changelist.getlist().empty();
+	}
+
+	bool IsStoredPrefixModeOnly(const HistoryItem& item) const
+	{
+		Modes::ChangeList changelist;
+		if (!BuildStoredModeChangeList(item, changelist))
+			return false;
+		return ChangeListIsPrefixModesOnly(changelist);
+	}
+
+	bool ShouldSkipPrefixModeEvent(const HistoryItem& item) const
+	{
+		return !saveusermodes && item.is_event && irc::equals(item.command, "MODE")
+			&& IsStoredPrefixModeOnly(item);
+	}
+
+	void PurgeStoredPrefixModeEvents()
+	{
+		size_t removed = 0;
+		for (const auto& [_, chan] : ServerInstance->Channels.GetChans())
+		{
+			HistoryList* list = chanhist.Get(chan);
+			if (!list)
+				continue;
+
+			const auto before = list->lines.size();
+			list->lines.erase(std::remove_if(list->lines.begin(), list->lines.end(),
+				[this](const HistoryItem& item) { return ShouldSkipPrefixModeEvent(item); }),
+				list->lines.end());
+			removed += before - list->lines.size();
+		}
+
+		if (removed)
+		{
+			ServerInstance->Logs.Normal(MODNAME, "Purged {} prefix MODE event(s) from chathistory",
+				removed);
+		}
 	}
 
 	bool IncludeHistoryItem(const HistoryItem& item, bool want_events) const
@@ -460,7 +516,7 @@ public:
 			return true;
 		if (!want_events)
 			return false;
-		if (!saveusermodes && IsStoredPrefixModeOnly(item))
+		if (ShouldSkipPrefixModeEvent(item))
 			return false;
 		return true;
 	}
