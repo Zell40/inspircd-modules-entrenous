@@ -101,16 +101,18 @@ Compatible avec **Orbit**, qui négocie uniquement `draft/metadata-2` et attend 
 - `METADATA * SUB avatar bio pronouns timezone url`
 - `METADATA <nick> GET …`
 - pushes live en verbe `METADATA <target> <key> <visibility> [:<value>]` (ou numeric `761`)
+- préférences buffer **par utilisateur** : `soju.im/muted`, `soju.im/pinned`, `soju.im/blocked` (`0`/`1`) sur un salon ou un nick (sourdine Web Push, etc.)
 
 Les clients `draft/metadata-3` reçoivent les pushes en numeric `761` / `766` (comportement -3).
 
-Stockage local (fichier data), clé = **compte** SASL si connecté, sinon nick. Pas de sync S2S pour l’instant (réseau mono-serveur).
+Stockage local (fichier data), clé = **compte** SASL si connecté, sinon nick. Pas de sync S2S pour l’instant (réseau mono-serveur). Les clés `soju.im/*` buffer ne sont **pas** partagées entre membres du salon (contrairement au metadata canal classique).
 
 ## Installation
 
 1. Copier `m_ircv3_metadata.cpp` dans `src/modules/` de ton arbre InspIRCd 4.
-2. Recompiler (`make`).
-3. Charger **après** `cap` (et `account` / `monitor` recommandés) :
+2. Copier `ircv3_metadata.h` dans `include/modules/` (API pour `m_ircv3_webpush`).
+3. Recompiler (`make`).
+4. Charger **après** `cap` (et `account` / `monitor` recommandés) :
 
 ```xml
 <module name="cap">
@@ -139,8 +141,8 @@ Stockage local (fichier data), clé = **compte** SASL si connecté, sinon nick. 
 | `maxkeys` | 16 | Plafond de clés stockées par utilisateur/canal |
 | `maxvaluebytes` | 500 | Taille max d’une valeur |
 | `requireaccount` | yes | `SET` exige un compte SASL |
-| `allowkeys` | `avatar bio pronouns timezone url` | Liste blanche (vide = toute clé valide) |
-| `persistfile` | `ircv3-metadata.db` | Persistance des métadonnées utilisateur |
+| `allowkeys` | `avatar bio pronouns timezone url` | Liste blanche profil (vide = toute clé valide). Les clés buffer `soju.im/muted`, `soju.im/pinned`, `soju.im/blocked` sont **toujours** autorisées |
+| `persistfile` | `ircv3-metadata.db` | Persistance profil + préférences buffer |
 | `synclimit` | 200 | Au-delà, `JOIN` envoie `774` au lieu du burst |
 | `beforeconnect` | no | Autoriser `METADATA` avant le 001 |
 | `saveperiod` | 30s | Fréquence d’écriture du fichier |
@@ -152,8 +154,12 @@ Exemple Orbit / client :
 METADATA * SET avatar :https://cdn.example/me.png
 METADATA * SET bio :Bonjour
 METADATA Alice GET avatar bio pronouns timezone url
+METADATA #salon SET soju.im/muted 1
+METADATA #salon SET soju.im/muted
+METADATA #salon GET soju.im/muted
 ```
 
+API C++ (`include/modules/ircv3_metadata.h`) : `IRCv3Metadata::API` expose `IsMuted` / `IsMutedOwner` / `IsBlocked` pour d’autres modules (webpush).
 ## Dépendances
 
 - `cap` (obligatoire pour annoncer les caps)
@@ -355,13 +361,15 @@ InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que 
 Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les certificats CA système doivent être installés pour valider le TLS des endpoints (FCM, Mozilla autopush, etc.).
 
 1. Copier le dossier `m_ircv3_webpush/` entier dans `src/modules/` de ton arbre InspIRCd 4 (une seule entrée, comme `m_spanningtree`).
-2. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` de `main.cpp`.
-3. Charger **après** `cap` (et `account` si `requireaccount="yes"`) :
+2. Copier `ircv3_metadata.h` dans `include/modules/` (si pas déjà fait avec le module metadata).
+3. Recompiler (`make`). Le `./configure` d’InspIRCd lit les `$CompilerFlags` / `$LinkerFlags` de `main.cpp`.
+4. Charger **après** `cap`, `account` (si `requireaccount="yes"`), et de préférence **`ircv3_metadata`** (mute salon → pas de push) :
 
 ```xml
 <module name="cap">
 <module name="account">
 <module name="ircv3">
+<module name="ircv3_metadata">
 <module name="ircv3_webpush">
 
 <webpush
@@ -406,11 +414,12 @@ Les caps ne sont **pas** listées en CAP LS 301. Le client **doit** `CAP REQ soj
 
 ## Quand un push part
 
-- **PRIVMSG/NOTICE** privé vers un utilisateur local qui a des abonnements, s’il est away, si `pushalways` est actif, ou si plus aucune session « registrar » n’est en ligne.
-- **Highlight** (nick, frontières de mot) dans un canal, mêmes conditions.
-- **INVITE**.
-- **MP offline** : `PRIVMSG`/`NOTICE` vers un nick inexistant qui était le dernier nick d’un compte abonné (`pushoffline`).
+- **PRIVMSG/NOTICE** privé vers un utilisateur local qui a des abonnements, s’il est away, si `pushalways` est actif, ou si plus aucune session « registrar » n’est en ligne — **sauf** si le destinataire a `soju.im/muted=1` (ou `soju.im/blocked=1` sur l’émetteur) via `ircv3_metadata`.
+- **Highlight** (nick, frontières de mot) dans un canal, mêmes conditions — **sauf** canal en sourdine (`METADATA #chan SET soju.im/muted 1`).
+- **INVITE** — **sauf** si le canal invité est en sourdine.
+- **MP offline** : `PRIVMSG`/`NOTICE` vers un nick inexistant qui était le dernier nick d’un compte abonné (`pushoffline`) — respect du mute sur cette cible.
 
+Sans `ircv3_metadata` chargé, le filtrage mute est ignoré (comportement précédent).
 Le payload est **une ligne IRC** sans CRLF, avec tags `time`, `msgid` (si présent) et `account` (si présent). Un `410`/`404` HTTP retire l’abonnement.
 
 Les POST partent d’un thread dédié pour ne pas bloquer l’ircd.

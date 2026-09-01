@@ -35,6 +35,7 @@
 #include "inspircd.h"
 #include "modules/account.h"
 #include "modules/cap.h"
+#include "modules/ircv3_metadata.h"
 #include "modules/ircv3_replies.h"
 #include "modules/ircv3_servertime.h"
 #include "modules/isupport.h"
@@ -156,6 +157,7 @@ class ModuleWebPush final
 {
 public:
 	Account::API accountapi;
+	IRCv3Metadata::API metadataapi;
 	WebPushCap cap_soju;
 	WebPushCap cap_draft;
 	IRCv3::Replies::Fail fail;
@@ -201,6 +203,7 @@ public:
 		, Account::EventListener(this)
 		, Timer(30, true)
 		, accountapi(this)
+		, metadataapi(this)
 		, cap_soju(this, CAP_SOJU)
 		, cap_draft(this, CAP_DRAFT)
 		, fail(this)
@@ -336,6 +339,9 @@ public:
 		if (IsCTCPText(parameters[1], ctcpname) && !irc::equals(ctcpname, "ACTION"))
 			return MOD_RES_PASSTHRU;
 
+		if (IsTargetMutedForOwner(ownerit->first, target))
+			return MOD_RES_PASSTHRU;
+
 		PushToOwner(ownerit->first, ownerit->second, user, command, target, parameters[1], {}, "high", true);
 		return MOD_RES_PASSTHRU;
 	}
@@ -359,6 +365,8 @@ public:
 			auto it = owners.find(owner);
 			if (it == owners.end())
 				return;
+			if (IsMuted(local, dest->nick) || IsBlocked(local, user->nick))
+				return;
 			if (!ShouldNotifyUser(local, it->second, /*direct=*/true))
 				return;
 			PushToOwner(owner, it->second, user, command, dest->nick, details.text, details.tags_out, "high", false);
@@ -377,6 +385,8 @@ public:
 					continue;
 				auto it = owners.find(owner);
 				if (it == owners.end())
+					continue;
+				if (IsMuted(local, chan->name))
 					continue;
 				if (!ShouldNotifyUser(local, it->second, /*direct=*/false))
 					continue;
@@ -401,6 +411,8 @@ public:
 			return;
 		auto it = owners.find(owner);
 		if (it == owners.end())
+			return;
+		if (IsMuted(local, channel->name))
 			return;
 		if (!ShouldNotifyUser(local, it->second, /*direct=*/true))
 			return;
@@ -429,7 +441,30 @@ public:
 		return cap_soju.IsEnabled(user) || cap_draft.IsEnabled(user);
 	}
 
-	std::string OwnerKey(LocalUser* user)
+	bool IsMuted(LocalUser* user, const std::string& target) const
+	{
+		return metadataapi && metadataapi->IsMuted(user, target);
+	}
+
+	bool IsBlocked(LocalUser* user, const std::string& target) const
+	{
+		return metadataapi && metadataapi->IsBlocked(user, target);
+	}
+
+	/** Offline-PM path: map webpush owner key to metadata owner. */
+	bool IsTargetMutedForOwner(const std::string& owner, const std::string& target) const
+	{
+		if (!metadataapi || owner.size() < 3)
+			return false;
+		std::string meta_owner;
+		if (owner.compare(0, 2, "a:") == 0 || owner.compare(0, 2, "n:") == 0)
+			meta_owner = owner.substr(2);
+		else
+			meta_owner = owner;
+		return metadataapi->IsMutedOwner(meta_owner, target);
+	}
+
+	std::string OwnerKey(LocalUser* user) const
 	{
 		if (accountapi)
 		{

@@ -3,6 +3,7 @@
  *
  * Provides IRCv3 draft/metadata-2 and draft/metadata-3 (METADATA GET/SET/…).
  * Compatible with Orbit (draft/metadata-2: METADATA * SUB, GET, METADATA/761 pushes).
+ * Per-user buffer prefs (soju.im/muted, soju.im/pinned, soju.im/blocked) for Web Push.
  *
  * Copyright (C) 2026
  *
@@ -28,12 +29,17 @@
 #include "modules/account.h"
 #include "modules/cap.h"
 #include "modules/ircv3_replies.h"
+#include "modules/ircv3_metadata.h"
 #include "modules/monitor.h"
 #include "modules/whois.h"
 
 #include <cctype>
 #include <fstream>
 #include <set>
+
+static constexpr const char* KEY_MUTED = "soju.im/muted";
+static constexpr const char* KEY_PINNED = "soju.im/pinned";
+static constexpr const char* KEY_BLOCKED = "soju.im/blocked";
 
 enum MetaNumeric
 {
@@ -49,11 +55,19 @@ enum MetaNumeric
 
 using MetaMap = std::map<std::string, std::string>;
 using KeySet = std::set<std::string>;
+using TargetPrefs = std::map<std::string, MetaMap, irc::insensitive_swo>;
 
 struct UserSubs final
 {
 	KeySet keys;
 };
+
+static bool IsBufferPrefKey(const std::string& key)
+{
+	return irc::equals(key, KEY_MUTED)
+		|| irc::equals(key, KEY_PINNED)
+		|| irc::equals(key, KEY_BLOCKED);
+}
 
 static bool IsValidMetaKey(const std::string& key)
 {
@@ -141,6 +155,7 @@ public:
 	SimpleExtItem<MetaMap> chanmetaext;
 
 	std::map<std::string, MetaMap, irc::insensitive_swo> usermeta;
+	std::map<std::string, TargetPrefs, irc::insensitive_swo> bufferprefs;
 	bool dirty = false;
 
 	size_t maxsubs = 32;
@@ -152,6 +167,20 @@ public:
 	std::string persistfile;
 	KeySet allowkeys;
 	unsigned long saveperiod = 30;
+
+	class MetadataAPIImpl final
+		: public IRCv3Metadata::APIBase
+	{
+		ModuleIRCv3Metadata& mod;
+
+	public:
+		MetadataAPIImpl(ModuleIRCv3Metadata& parent);
+		bool IsMuted(LocalUser* user, const std::string& target) const override;
+		bool IsMutedOwner(const std::string& owner, const std::string& target) const override;
+		bool IsBlocked(LocalUser* user, const std::string& target) const override;
+	};
+
+	MetadataAPIImpl apiimpl;
 
 	ModuleIRCv3Metadata()
 		: Module(VF_NONE, "Provides the IRCv3 draft/metadata-2 and draft/metadata-3 capabilities.")
@@ -167,6 +196,7 @@ public:
 		, cmd(this, *this, fail)
 		, subsext(this, "ircv3-metadata-subs", ExtensionType::USER, false)
 		, chanmetaext(this, "ircv3-metadata-chan", ExtensionType::CHANNEL, false)
+		, apiimpl(*this)
 	{
 	}
 
@@ -238,6 +268,8 @@ public:
 	{
 		if (!IsValidMetaKey(key))
 			return false;
+		if (IsBufferPrefKey(key))
+			return true;
 		if (allowkeys.empty())
 			return true;
 		return allowkeys.find(key) != allowkeys.end();
@@ -267,6 +299,151 @@ public:
 	MetaMap* GetUserStore(User* user, bool create)
 	{
 		return GetUserStore(OwnerKey(user), create);
+	}
+
+	MetaMap* GetBufferStore(const std::string& owner, const std::string& target, bool create)
+	{
+		auto oit = bufferprefs.find(owner);
+		if (oit == bufferprefs.end())
+		{
+			if (!create)
+				return nullptr;
+			return &bufferprefs[owner][target];
+		}
+		auto tit = oit->second.find(target);
+		if (tit != oit->second.end())
+			return &tit->second;
+		if (!create)
+			return nullptr;
+		return &oit->second[target];
+	}
+
+	MetaMap* GetBufferStore(User* user, const std::string& target, bool create)
+	{
+		return GetBufferStore(OwnerKey(user), target, create);
+	}
+
+	void TrimBufferOwner(const std::string& owner)
+	{
+		auto oit = bufferprefs.find(owner);
+		if (oit == bufferprefs.end())
+			return;
+		for (auto tit = oit->second.begin(); tit != oit->second.end(); )
+		{
+			if (tit->second.empty())
+				tit = oit->second.erase(tit);
+			else
+				++tit;
+		}
+		if (oit->second.empty())
+			bufferprefs.erase(oit);
+	}
+
+	bool GetBufferFlag(LocalUser* user, const std::string& target, const char* key) const
+	{
+		if (!user || target.empty())
+			return false;
+		return GetBufferFlagOwner(OwnerKey(user), target, key);
+	}
+
+	bool GetBufferFlagOwner(const std::string& owner, const std::string& target, const char* key) const
+	{
+		if (owner.empty() || target.empty())
+			return false;
+		auto oit = bufferprefs.find(owner);
+		if (oit == bufferprefs.end())
+			return false;
+		auto tit = oit->second.find(target);
+		if (tit == oit->second.end())
+			return false;
+		auto kit = tit->second.find(key);
+		if (kit == tit->second.end())
+			return false;
+		return kit->second == "1";
+	}
+
+	bool RequireAccountForWrite(LocalUser* user, const std::string& key)
+	{
+		if (!requireaccount)
+			return true;
+		if (accountapi && accountapi->GetAccountName(user))
+			return true;
+		fail.Send(user, &cmd, "KEY_NO_PERMISSION", "*", key,
+			"You must be logged in to set metadata");
+		return false;
+	}
+
+	static bool IsValidBufferBool(const std::string& value)
+	{
+		return value == "0" || value == "1";
+	}
+
+	CmdResult HandleBufferSet(LocalUser* user, const std::string& target, const std::string& key,
+		const std::string* value_opt)
+	{
+		if (!RequireAccountForWrite(user, key))
+			return CmdResult::FAILURE;
+
+		std::string storekey = key;
+		ToLowerInPlace(storekey);
+
+		std::string display = target;
+		if (ServerInstance->Channels.IsChannel(target))
+		{
+			Channel* chan = ServerInstance->Channels.Find(target);
+			if (!chan || !chan->HasUser(user))
+			{
+				FailInvalidTarget(user, target);
+				return CmdResult::FAILURE;
+			}
+			display = chan->name;
+		}
+		else if (target == "*")
+		{
+			FailInvalidTarget(user, target);
+			return CmdResult::FAILURE;
+		}
+		else
+		{
+			User* peer = ServerInstance->Users.FindNick(target);
+			if (peer)
+				display = peer->nick;
+		}
+
+		const bool clearing = !value_opt || value_opt->empty() || *value_opt == "0";
+		if (!clearing && !IsValidBufferBool(*value_opt))
+		{
+			fail.Send(user, &cmd, PreferMeta3(user) ? "INVALID_VALUE" : "VALUE_INVALID",
+				key, "Value must be 0 or 1");
+			return CmdResult::FAILURE;
+		}
+
+		const std::string owner = OwnerKey(user);
+		if (clearing)
+		{
+			MetaMap* store = GetBufferStore(owner, display, false);
+			if (store)
+			{
+				store->erase(storekey);
+				TrimBufferOwner(owner);
+			}
+			dirty = true;
+			SendKeyNotSet(user, display, storekey);
+			NotifyWatcher(user, display, storekey, nullptr);
+			return CmdResult::SUCCESS;
+		}
+
+		MetaMap* store = GetBufferStore(owner, display, true);
+		if (store->find(storekey) == store->end() && store->size() >= maxkeys)
+		{
+			fail.Send(user, &cmd, "LIMIT_REACHED", key, "Metadata limit reached");
+			return CmdResult::FAILURE;
+		}
+		(*store)[storekey] = "1";
+		dirty = true;
+		SendKeyValue(user, display, storekey, "1");
+		NotifyWatcher(user, display, storekey, &(*store)[storekey]);
+		return CmdResult::SUCCESS;
 	}
 
 	UserSubs* GetSubs(LocalUser* user, bool create)
@@ -449,8 +626,23 @@ public:
 		{
 			for (const auto& key : subs->keys)
 			{
+				if (IsBufferPrefKey(key))
+					continue;
 				auto it = cstore->find(key);
 				if (it != cstore->end())
+					NotifyWatcher(user, chan->name, key, &it->second);
+			}
+		}
+
+		MetaMap* bstore = GetBufferStore(user, chan->name, false);
+		if (bstore)
+		{
+			for (const auto& key : subs->keys)
+			{
+				if (!IsBufferPrefKey(key))
+					continue;
+				auto it = bstore->find(key);
+				if (it != bstore->end())
 					NotifyWatcher(user, chan->name, key, &it->second);
 			}
 		}
@@ -464,6 +656,8 @@ public:
 			{
 				for (const auto& key : subs->keys)
 				{
+					if (IsBufferPrefKey(key))
+						continue;
 					auto it = ustore->find(key);
 					if (it != ustore->end())
 						NotifyWatcher(user, member->nick, key, &it->second);
@@ -474,12 +668,14 @@ public:
 
 	void HandleGet(LocalUser* user, const std::string& target, const std::vector<std::string>& keys)
 	{
-		MetaMap* store = nullptr;
+		MetaMap* profilestore = nullptr;
+		MetaMap* bufferstore = nullptr;
 		std::string display = target;
+		bool channel_target = false;
 
 		if (target == "*")
 		{
-			store = GetUserStore(user, false);
+			profilestore = GetUserStore(user, false);
 			display = "*";
 		}
 		else if (ServerInstance->Channels.IsChannel(target))
@@ -490,18 +686,22 @@ public:
 				FailInvalidTarget(user, target);
 				return;
 			}
-			store = chanmetaext.Get(chan);
+			display = chan->name;
+			channel_target = true;
+			profilestore = chanmetaext.Get(chan);
+			bufferstore = GetBufferStore(user, display, false);
 		}
 		else
 		{
 			User* dest = ServerInstance->Users.FindNick(target);
-			if (!dest)
+			if (dest)
 			{
-				FailInvalidTarget(user, target);
-				return;
+				display = dest->nick;
+				profilestore = GetUserStore(dest, false);
 			}
-			store = GetUserStore(dest, false);
-			display = dest->nick;
+			else
+				display = target;
+			bufferstore = GetBufferStore(user, display, false);
 		}
 
 		for (const auto& key : keys)
@@ -516,13 +716,45 @@ public:
 				fail.Send(user, &cmd, "KEY_NO_PERMISSION", display, key, "Permission denied");
 				continue;
 			}
-			if (!store)
+
+			if (IsBufferPrefKey(key))
+			{
+				if (target == "*")
+				{
+					SendKeyNotSet(user, display, key);
+					continue;
+				}
+				if (channel_target)
+				{
+					Channel* chan = ServerInstance->Channels.Find(display);
+					if (!chan || !chan->HasUser(user))
+					{
+						fail.Send(user, &cmd, "KEY_NO_PERMISSION", display, key, "Permission denied");
+						continue;
+					}
+				}
+				std::string look = key;
+				ToLowerInPlace(look);
+				if (!bufferstore)
+				{
+					SendKeyNotSet(user, display, look);
+					continue;
+				}
+				auto it = bufferstore->find(look);
+				if (it == bufferstore->end())
+					SendKeyNotSet(user, display, look);
+				else
+					SendKeyValue(user, display, look, it->second);
+				continue;
+			}
+
+			if (!profilestore)
 			{
 				SendKeyNotSet(user, display, key);
 				continue;
 			}
-			auto it = store->find(key);
-			if (it == store->end())
+			auto it = profilestore->find(key);
+			if (it == profilestore->end())
 				SendKeyNotSet(user, display, key);
 			else
 				SendKeyValue(user, display, key, it->second);
@@ -533,11 +765,13 @@ public:
 
 	void HandleList(LocalUser* user, const std::string& target)
 	{
-		MetaMap* store = nullptr;
+		MetaMap* profilestore = nullptr;
+		MetaMap* bufferstore = nullptr;
 		std::string display = target;
+
 		if (target == "*")
 		{
-			store = GetUserStore(user, false);
+			profilestore = GetUserStore(user, false);
 			display = "*";
 		}
 		else if (ServerInstance->Channels.IsChannel(target))
@@ -548,25 +782,37 @@ public:
 				FailInvalidTarget(user, target);
 				return;
 			}
-			store = chanmetaext.Get(chan);
+			display = chan->name;
+			profilestore = chanmetaext.Get(chan);
+			if (chan->HasUser(user))
+				bufferstore = GetBufferStore(user, display, false);
 		}
 		else
 		{
 			User* dest = ServerInstance->Users.FindNick(target);
-			if (!dest)
+			if (dest)
 			{
-				FailInvalidTarget(user, target);
-				return;
+				display = dest->nick;
+				profilestore = GetUserStore(dest, false);
 			}
-			store = GetUserStore(dest, false);
-			display = dest->nick;
+			else
+				display = target;
+			bufferstore = GetBufferStore(user, display, false);
 		}
 
-		if (store)
+		if (profilestore)
 		{
-			for (const auto& [key, value] : *store)
+			for (const auto& [key, value] : *profilestore)
 			{
-				if (KeyAllowed(key))
+				if (KeyAllowed(key) && !IsBufferPrefKey(key))
+					SendKeyValue(user, display, key, value);
+			}
+		}
+		if (bufferstore)
+		{
+			for (const auto& [key, value] : *bufferstore)
+			{
+				if (IsBufferPrefKey(key))
 					SendKeyValue(user, display, key, value);
 			}
 		}
@@ -580,6 +826,9 @@ public:
 			FailInvalidKey(user, key);
 			return CmdResult::FAILURE;
 		}
+
+		if (IsBufferPrefKey(key))
+			return HandleBufferSet(user, target, key, value_opt);
 
 		const bool clearing = !value_opt || value_opt->empty();
 		if (!clearing && value_opt->size() > maxvaluebytes)
@@ -635,15 +884,8 @@ public:
 			return CmdResult::FAILURE;
 		}
 
-		if (requireaccount)
-		{
-			if (!accountapi || !accountapi->GetAccountName(user))
-			{
-				fail.Send(user, &cmd, "KEY_NO_PERMISSION", "*", key,
-					"You must be logged in to set metadata");
-				return CmdResult::FAILURE;
-			}
-		}
+		if (!RequireAccountForWrite(user, key))
+			return CmdResult::FAILURE;
 
 		MetaMap* store = GetUserStore(user, true);
 		if (clearing)
@@ -899,14 +1141,27 @@ public:
 		if (account.empty())
 			return;
 		auto nickit = usermeta.find(user->nick);
-		if (nickit == usermeta.end())
-			return;
-		auto& acctstore = usermeta[account];
-		if (acctstore.empty())
+		if (nickit != usermeta.end())
 		{
-			acctstore = std::move(nickit->second);
-			usermeta.erase(nickit);
-			dirty = true;
+			auto& acctstore = usermeta[account];
+			if (acctstore.empty())
+			{
+				acctstore = std::move(nickit->second);
+				usermeta.erase(nickit);
+				dirty = true;
+			}
+		}
+
+		auto bufit = bufferprefs.find(user->nick);
+		if (bufit != bufferprefs.end())
+		{
+			auto& dest = bufferprefs[account];
+			if (dest.empty())
+			{
+				dest = std::move(bufit->second);
+				bufferprefs.erase(bufit);
+				dirty = true;
+			}
 		}
 	}
 
@@ -921,7 +1176,7 @@ public:
 		UserSubs* subs = GetSubs(source, false);
 		for (const auto& [key, value] : *store)
 		{
-			if (!KeyAllowed(key))
+			if (!KeyAllowed(key) || IsBufferPrefKey(key))
 				continue;
 			if (subs && !subs->keys.empty() && subs->keys.find(key) == subs->keys.end())
 				continue;
@@ -932,6 +1187,7 @@ public:
 	void LoadStore()
 	{
 		usermeta.clear();
+		bufferprefs.clear();
 		std::ifstream in(persistfile.c_str());
 		if (!in)
 			return;
@@ -941,6 +1197,25 @@ public:
 		{
 			if (line.empty() || line[0] == '#')
 				continue;
+			if (line.compare(0, 2, "b\t") == 0)
+			{
+				irc::sepstream stream(line.substr(2), '\t');
+				std::string bowner;
+				std::string btarget;
+				std::string bkey;
+				std::string bval;
+				if (!stream.GetToken(bowner) || !stream.GetToken(btarget)
+					|| !stream.GetToken(bkey) || !stream.GetToken(bval))
+				{
+					continue;
+				}
+				if (IsBufferPrefKey(bkey) && (bval == "0" || bval == "1"))
+				{
+					if (bval == "1")
+						bufferprefs[bowner][btarget][bkey] = bval;
+				}
+				continue;
+			}
 			if (line[0] == '@')
 			{
 				owner = line.substr(1);
@@ -953,11 +1228,11 @@ public:
 				continue;
 			std::string key = line.substr(0, sep);
 			std::string val = line.substr(sep + 1);
-			if (IsValidMetaKey(key))
+			if (IsValidMetaKey(key) && !IsBufferPrefKey(key))
 				usermeta[owner][key] = val;
 		}
-		ServerInstance->Logs.Normal(MODNAME, "Loaded metadata for {} owner(s) from {}",
-			usermeta.size(), persistfile);
+		ServerInstance->Logs.Normal(MODNAME, "Loaded metadata for {} owner(s), {} buffer-pref owner(s) from {}",
+			usermeta.size(), bufferprefs.size(), persistfile);
 	}
 
 	void SaveStore()
@@ -968,12 +1243,20 @@ public:
 			ServerInstance->Logs.Normal(MODNAME, "Failed to write {}", persistfile);
 			return;
 		}
-		out << "# m_ircv3_metadata v1\n";
-		for (const auto& [owner, keys] : usermeta)
+		out << "# m_ircv3_metadata v2 (profile @owner + b\\towner\\ttarget\\tkey\\tvalue)\n";
+		for (const auto& [ow, keys] : usermeta)
 		{
-			out << '@' << owner << '\n';
+			out << '@' << ow << '\n';
 			for (const auto& [k, v] : keys)
 				out << k << '=' << v << '\n';
+		}
+		for (const auto& [ow, targets] : bufferprefs)
+		{
+			for (const auto& [tgt, keys] : targets)
+			{
+				for (const auto& [k, v] : keys)
+					out << "b\t" << ow << '\t' << tgt << '\t' << k << '\t' << v << '\n';
+			}
 		}
 		dirty = false;
 	}
@@ -990,6 +1273,27 @@ CommandMetadata::CommandMetadata(Module* Creator, ModuleIRCv3Metadata& Mod, IRCv
 	, fail(Fail)
 {
 	works_before_reg = true;
+}
+
+ModuleIRCv3Metadata::MetadataAPIImpl::MetadataAPIImpl(ModuleIRCv3Metadata& parent)
+	: IRCv3Metadata::APIBase(&parent)
+	, mod(parent)
+{
+}
+
+bool ModuleIRCv3Metadata::MetadataAPIImpl::IsMuted(LocalUser* user, const std::string& target) const
+{
+	return mod.GetBufferFlag(user, target, KEY_MUTED);
+}
+
+bool ModuleIRCv3Metadata::MetadataAPIImpl::IsMutedOwner(const std::string& owner, const std::string& target) const
+{
+	return mod.GetBufferFlagOwner(owner, target, KEY_MUTED);
+}
+
+bool ModuleIRCv3Metadata::MetadataAPIImpl::IsBlocked(LocalUser* user, const std::string& target) const
+{
+	return mod.GetBufferFlag(user, target, KEY_BLOCKED);
 }
 
 CmdResult CommandMetadata::HandleLocal(LocalUser* user, const Params& parameters)
