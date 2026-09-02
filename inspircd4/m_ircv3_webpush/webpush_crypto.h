@@ -18,6 +18,7 @@
 
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
+#include <openssl/ec.h>
 #include <openssl/ecdsa.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -249,24 +250,46 @@ inline bool EvpPublicUncompressed(EVP_PKEY* pkey, std::string& out)
 {
 	if (!pkey)
 		return false;
+
+	unsigned char buf[133];
 	size_t publen = 0;
-	if (!EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, nullptr, 0, &publen))
+	if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, buf, sizeof(buf), &publen)
+		&& publen >= 33 && publen <= sizeof(buf))
+	{
+		if (publen == 65 && buf[0] == 0x04)
+		{
+			out.assign(reinterpret_cast<char*>(buf), publen);
+			return true;
+		}
+		if (publen == 33 && (buf[0] == 0x02 || buf[0] == 0x03))
+		{
+			EVP_PKEY* full = EvpFromUncompressed(buf, publen);
+			if (!full)
+				return false;
+			bool ok = EvpPublicUncompressed(full, out);
+			EVP_PKEY_free(full);
+			return ok;
+		}
+	}
+
+	// Fallback: derive uncompressed Q = d·G (EC_GROUP/EC_POINT still supported).
+	BIGNUM* priv = nullptr;
+	if (!EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &priv) || !priv)
 		return false;
-	out.resize(publen);
-	if (!EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY,
-		reinterpret_cast<unsigned char*>(&out[0]), publen, &publen))
-		return false;
-	out.resize(publen);
-	if (publen == 65)
-		return out[0] == '\x04';
-	if (publen != 33)
-		return false;
-	EVP_PKEY* full = EvpFromUncompressed(reinterpret_cast<const unsigned char*>(out.data()), publen);
-	if (!full)
-		return false;
-	bool ok = EvpPublicUncompressed(full, out);
-	EVP_PKEY_free(full);
-	return ok && out.size() == 65 && out[0] == '\x04';
+	EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+	EC_POINT* point = group ? EC_POINT_new(group) : nullptr;
+	bool ok = group && point
+		&& EC_POINT_mul(group, point, priv, nullptr, nullptr, nullptr) == 1;
+	size_t n = 0;
+	if (ok)
+		n = EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED, buf, sizeof(buf), nullptr);
+	ok = ok && n == 65 && buf[0] == 0x04;
+	if (ok)
+		out.assign(reinterpret_cast<char*>(buf), n);
+	EC_POINT_free(point);
+	EC_GROUP_free(group);
+	BN_free(priv);
+	return ok;
 }
 
 /** If pkey has no exportable public octets (common for PEM with private EC only), rebuild from priv. */
