@@ -107,6 +107,15 @@ int main()
 	ExpectHex("CEK", std::string(reinterpret_cast<char*>(cek), 16), want_cek);
 	ExpectHex("NONCE", std::string(reinterpret_cast<char*>(nonce), 12), want_nonce);
 
+	std::printf("… pubkey export\n");
+	std::string as_pub_probe;
+	if (!WebPush::EvpPublicUncompressed(as_key, as_pub_probe))
+	{
+		std::fprintf(stderr, "EvpPublicUncompressed failed: %s\n", WebPush::OpenSSLError().c_str());
+		return 1;
+	}
+	ExpectHex("as_public_export", as_pub_probe, as_public);
+
 	std::printf("… encrypt\n");
 	std::string body;
 	std::string as_pub_out;

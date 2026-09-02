@@ -263,11 +263,20 @@ inline bool EvpPublicUncompressed(EVP_PKEY* pkey, std::string& out)
 		}
 		if (publen == 33 && (buf[0] == 0x02 || buf[0] == 0x03))
 		{
-			EVP_PKEY* full = EvpFromUncompressed(buf, publen);
-			if (!full)
-				return false;
-			bool ok = EvpPublicUncompressed(full, out);
-			EVP_PKEY_free(full);
+			EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+			EC_POINT* point = group ? EC_POINT_new(group) : nullptr;
+			unsigned char full[133];
+			size_t n = 0;
+			bool ok = group && point
+				&& EC_POINT_oct2point(group, point, buf, publen, nullptr) == 1;
+			if (ok)
+				n = EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED,
+					full, sizeof(full), nullptr);
+			ok = ok && n == 65 && full[0] == 0x04;
+			if (ok)
+				out.assign(reinterpret_cast<char*>(full), n);
+			EC_POINT_free(point);
+			EC_GROUP_free(group);
 			return ok;
 		}
 	}
@@ -344,7 +353,7 @@ inline bool Aes128GcmEncrypt(const unsigned char* key, const unsigned char* nonc
 		return false;
 	int len = 0;
 	int ctlen = 0;
-	ct.assign(ptlen + 16, '\0');
+	ct.assign(ptlen + 16 + EVP_MAX_BLOCK_LENGTH, '\0');
 	auto* out = reinterpret_cast<unsigned char*>(&ct[0]);
 	bool ok = EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) == 1
 		&& EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) == 1
