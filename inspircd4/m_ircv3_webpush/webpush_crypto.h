@@ -476,11 +476,11 @@ struct VapidKeys
 		EVP_PKEY_free(pkey);
 	}
 
-	bool SetFromPkey(EVP_PKEY* pkey)
+	bool SetFromPkey(EVP_PKEY* src)
 	{
-		EVP_PKEY_free(this->pkey);
-		this->pkey = pkey;
-		if (!pkey || !EvpPublicUncompressed(pkey, public_uncompressed))
+		EVP_PKEY_free(pkey);
+		pkey = src;
+		if (!src || !EvpPublicUncompressed(src, public_uncompressed))
 			return false;
 		public_b64url = B64Encode(public_uncompressed, B64URL, false);
 		return true;
