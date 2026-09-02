@@ -27,6 +27,9 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+# include <openssl/provider.h>
+#endif
 
 #ifndef _WIN32
 # include <arpa/inet.h>
@@ -135,11 +138,25 @@ inline std::string OpenSSLError()
 	return buf;
 }
 
+/** OpenSSL 3.x needs the default provider for EC key import (standalone tests too). */
+inline void EnsureOpenSSLProviders()
+{
+	static bool ready = false;
+	if (ready)
+		return;
+	ready = true;
+	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	OSSL_PROVIDER_load(nullptr, "default");
+#endif
+}
+
 inline bool HkdfSha256(const unsigned char* salt, size_t saltlen,
 	const unsigned char* ikm, size_t ikmlen,
 	const unsigned char* info, size_t infolen,
 	unsigned char* out, size_t outlen)
 {
+	EnsureOpenSSLProviders();
 	EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
 	if (!pctx)
 		return false;
@@ -155,6 +172,7 @@ inline bool HkdfSha256(const unsigned char* salt, size_t saltlen,
 
 inline EVP_PKEY* EvpFromUncompressed(const unsigned char* pub, size_t publen)
 {
+	EnsureOpenSSLProviders();
 	if (publen != 65 && publen != 33)
 		return nullptr;
 
@@ -185,36 +203,47 @@ inline EVP_PKEY* EvpFromUncompressed(const unsigned char* pub, size_t publen)
 inline EVP_PKEY* EvpFromPrivateRaw(const unsigned char* priv, size_t privlen,
 	const unsigned char* pub, size_t publen)
 {
+	EnsureOpenSSLProviders();
 	if (privlen != 32)
 		return nullptr;
 
-	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
-	if (!ctx)
-		return nullptr;
-
-	EVP_PKEY* pkey = nullptr;
-	if (EVP_PKEY_fromdata_init(ctx) <= 0)
+	auto import = [&](const unsigned char* pubopt, size_t puboptlen) -> EVP_PKEY*
 	{
+		EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+		if (!ctx)
+			return nullptr;
+
+		EVP_PKEY* pkey = nullptr;
+		if (EVP_PKEY_fromdata_init(ctx) <= 0)
+		{
+			EVP_PKEY_CTX_free(ctx);
+			return nullptr;
+		}
+
+		OSSL_PARAM params[4];
+		params[0] = OSSL_PARAM_construct_utf8_string(
+			OSSL_PKEY_PARAM_GROUP_NAME, const_cast<char*>("prime256v1"), 0);
+		params[1] = OSSL_PARAM_construct_octet_string(
+			OSSL_PKEY_PARAM_PRIV_KEY, const_cast<unsigned char*>(priv), privlen);
+		int n = 2;
+		if (pubopt && puboptlen)
+			params[n++] = OSSL_PARAM_construct_octet_string(
+				OSSL_PKEY_PARAM_PUB_KEY, const_cast<unsigned char*>(pubopt), puboptlen);
+		params[n] = OSSL_PARAM_construct_end();
+
+		if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
+			pkey = nullptr;
 		EVP_PKEY_CTX_free(ctx);
-		return nullptr;
+		return pkey;
+	};
+
+	if (pub && publen)
+	{
+		EVP_PKEY* pkey = import(pub, publen);
+		if (pkey)
+			return pkey;
 	}
-
-	OSSL_PARAM params[4];
-	params[0] = OSSL_PARAM_construct_utf8_string(
-		OSSL_PKEY_PARAM_GROUP_NAME, const_cast<char*>("prime256v1"), 0);
-	params[1] = OSSL_PARAM_construct_octet_string(
-		OSSL_PKEY_PARAM_PRIV_KEY, const_cast<unsigned char*>(priv), privlen);
-	int n = 2;
-	if (pub)
-		params[n++] = OSSL_PARAM_construct_octet_string(
-			OSSL_PKEY_PARAM_PUB_KEY, const_cast<unsigned char*>(pub), publen);
-	params[n] = OSSL_PARAM_construct_end();
-
-	// EVP_PKEY_KEYPAIR accepts private-only EC import (pub optional).
-	if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
-		pkey = nullptr;
-	EVP_PKEY_CTX_free(ctx);
-	return pkey;
+	return import(nullptr, 0);
 }
 
 inline bool EvpPublicUncompressed(EVP_PKEY* pkey, std::string& out)
@@ -525,6 +554,7 @@ struct VapidKeys
 
 inline bool GenerateVapid(VapidKeys& keys)
 {
+	EnsureOpenSSLProviders();
 	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
 	if (!ctx)
 		return false;

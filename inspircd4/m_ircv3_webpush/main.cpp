@@ -39,12 +39,14 @@
 #include "modules/ircv3_replies.h"
 #include "modules/ircv3_servertime.h"
 #include "modules/isupport.h"
-#include "threadsocket.h"
 #include "timeutils.h"
 #include "utility/string.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <mutex>
+#include <thread>
 
 #include <openssl/sha.h>
 
@@ -139,19 +141,22 @@ public:
 	}
 };
 
+class ModuleWebPush;
+
 class PushWorker final
-	: public SocketThread
 {
 	ModuleWebPush* parent;
+	std::thread thread;
+	std::atomic<bool> stopping{false};
 
-	void OnStart() override;
-	void OnNotify() override;
+	void Run();
 
 public:
-	PushWorker(ModuleWebPush* mod)
-		: parent(mod)
-	{
-	}
+	explicit PushWorker(ModuleWebPush* mod);
+	~PushWorker();
+
+	void Start();
+	void Stop();
 };
 
 class CommandWebPush final
@@ -190,8 +195,13 @@ public:
 	CommandWebPush cmd;
 	PushWorker* worker = nullptr;
 
+	std::mutex inbox_mutex;
+	std::condition_variable inbox_cv;
 	std::mutex vapid_mutex;
 	WebPush::VapidKeys vapid;
+	bool vapid_ready = false;
+	bool subs_loaded = false;
+	bool runtime_ready = false;
 	std::string contact;
 	int ttl = 86400;
 	int http_timeout = 15;
@@ -239,23 +249,58 @@ public:
 
 	~ModuleWebPush() override
 	{
-		if (worker)
-		{
-			worker->Stop();
-			DrainReplies();
-			delete worker;
-			worker = nullptr;
-		}
+		StopPushWorker();
 		SaveSubscriptions();
+	}
+
+	void WakeWorker()
+	{
+		inbox_cv.notify_all();
+	}
+
+	void StopPushWorker()
+	{
+		if (!worker)
+			return;
+		worker->Stop();
+		delete worker;
+		worker = nullptr;
+		DrainReplies();
 	}
 
 	void StartPushWorker()
 	{
 		if (worker)
 			return;
-		OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
 		worker = new PushWorker(this);
 		worker->Start();
+	}
+
+	bool EnsureVapid()
+	{
+		std::lock_guard<std::mutex> lock(vapid_mutex);
+		if (vapid_ready)
+			return vapid.pkey != nullptr;
+		vapid_ready = true;
+		if (!WebPush::LoadVapidPem(vapid, vapidfile))
+		{
+			if (!WebPush::GenerateVapid(vapid) || !WebPush::SaveVapidPem(vapid, vapidfile))
+			{
+				ServerInstance->Logs.Normal(MODNAME, "WARNING: unable to load/create VAPID key file: {}",
+					vapidfile);
+				return false;
+			}
+			ServerInstance->Logs.Normal(MODNAME, "Generated new VAPID key pair in {}", vapidfile);
+		}
+		return vapid.pkey != nullptr;
+	}
+
+	void EnsureSubscriptions()
+	{
+		if (subs_loaded)
+			return;
+		subs_loaded = true;
+		LoadSubscriptions();
 	}
 
 	void init() override
@@ -290,25 +335,24 @@ public:
 		vapidfile = ServerInstance->Config->Paths.PrependData(tag->getString("vapidfile", "webpush-vapid.pem", 1));
 		persistfile = ServerInstance->Config->Paths.PrependData(tag->getString("persistfile", "webpush.db", 1));
 
+		StopPushWorker();
 		{
 			std::lock_guard<std::mutex> lock(vapid_mutex);
-			if (!WebPush::LoadVapidPem(vapid, vapidfile))
-			{
-				if (!WebPush::GenerateVapid(vapid) || !WebPush::SaveVapidPem(vapid, vapidfile))
-					throw ModuleException(this, "Unable to load or create VAPID key file: " + vapidfile
-						+ " (check data directory permissions and OpenSSL EC support)");
-				ServerInstance->Logs.Normal(MODNAME, "Generated new VAPID key pair in {}", vapidfile);
-			}
+			vapid = WebPush::VapidKeys();
+			vapid_ready = false;
 		}
-
-		if (status.initial || owners.empty())
-			LoadSubscriptions();
+		subs_loaded = false;
+		runtime_ready = false;
+		if (!status.initial)
+			owners.clear();
 
 		SetInterval(saveperiod);
 	}
 
 	void OnBuildISupport(ISupport::TokenMap& tokens) override
 	{
+		if (!EnsureVapid())
+			return;
 		std::lock_guard<std::mutex> lock(vapid_mutex);
 		if (!vapid.public_b64url.empty())
 			tokens["VAPID"] = vapid.public_b64url;
@@ -334,8 +378,19 @@ public:
 		dirty = true;
 	}
 
+	void EnsureRuntimeReady()
+	{
+		if (runtime_ready)
+			return;
+		runtime_ready = true;
+		EnsureSubscriptions();
+		EnsureVapid();
+	}
+
 	bool Tick() override
 	{
+		EnsureRuntimeReady();
+		DrainReplies();
 		if (dirty)
 			SaveSubscriptions();
 		ExpireSubscriptions();
@@ -584,12 +639,17 @@ public:
 
 	void Enqueue(PushJob job)
 	{
+		if (!EnsureVapid())
+			return;
+		EnsureSubscriptions();
 		StartPushWorker();
 		if (!worker)
 			return;
-		worker->LockQueue();
-		inbox.push_back(std::move(job));
-		worker->UnlockQueueWakeup();
+		{
+			std::lock_guard<std::mutex> lock(inbox_mutex);
+			inbox.push_back(std::move(job));
+		}
+		inbox_cv.notify_one();
 	}
 
 	void DrainReplies();
@@ -970,6 +1030,8 @@ CmdResult CommandWebPush::HandleLocal(LocalUser* user, const Params& parameters)
 		return CmdResult::FAILURE;
 	}
 
+	mod.EnsureSubscriptions();
+
 	if (irc::equals(subcmd, "LIST"))
 		return mod.HandleList(user, owner);
 
@@ -1137,19 +1199,47 @@ void ModuleWebPush::DrainReplies()
 	}
 }
 
-void PushWorker::OnStart()
+PushWorker::PushWorker(ModuleWebPush* mod)
+	: parent(mod)
 {
-	LockQueue();
-	while (!IsStopping())
+}
+
+PushWorker::~PushWorker()
+{
+	Stop();
+}
+
+void PushWorker::Start()
+{
+	stopping = false;
+	thread = std::thread([this] { Run(); });
+}
+
+void PushWorker::Stop()
+{
+	stopping = true;
+	parent->WakeWorker();
+	if (thread.joinable())
+		thread.join();
+}
+
+void PushWorker::Run()
+{
+	while (!stopping)
 	{
-		if (parent->inbox.empty())
+		PushJob job;
 		{
-			WaitForQueue();
-			continue;
+			std::unique_lock<std::mutex> lock(parent->inbox_mutex);
+			parent->inbox_cv.wait(lock, [&] {
+				return stopping || !parent->inbox.empty();
+			});
+			if (stopping && parent->inbox.empty())
+				break;
+			if (parent->inbox.empty())
+				continue;
+			job = std::move(parent->inbox.front());
+			parent->inbox.pop_front();
 		}
-		PushJob job = std::move(parent->inbox.front());
-		parent->inbox.pop_front();
-		UnlockQueue();
 
 		std::string body;
 		std::string jwt;
@@ -1202,15 +1292,7 @@ void PushWorker::OnStart()
 			reply.result = std::move(result);
 			parent->outbox.push_back(std::move(reply));
 		}
-		NotifyParent();
-		LockQueue();
 	}
-	UnlockQueue();
-}
-
-void PushWorker::OnNotify()
-{
-	parent->DrainReplies();
 }
 
 MODULE_INIT(ModuleWebPush)

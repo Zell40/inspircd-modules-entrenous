@@ -58,7 +58,8 @@ int main()
 		reinterpret_cast<const unsigned char*>(as_public.data()), as_public.size());
 	if (!as_key)
 	{
-		std::fprintf(stderr, "failed to load as_key\n");
+		std::fprintf(stderr, "failed to load as_key (priv=%zu): %s\n",
+			as_private.size(), WebPush::OpenSSLError().c_str());
 		return 1;
 	}
 	EVP_PKEY* ua_key = WebPush::EvpFromUncompressed(
