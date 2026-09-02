@@ -567,6 +567,14 @@ struct VapidKeys
 		EVP_PKEY_free(pkey);
 	}
 
+	void Reset()
+	{
+		EVP_PKEY_free(pkey);
+		pkey = nullptr;
+		public_uncompressed.clear();
+		public_b64url.clear();
+	}
+
 	bool SetFromPkey(EVP_PKEY* src)
 	{
 		EVP_PKEY_free(pkey);

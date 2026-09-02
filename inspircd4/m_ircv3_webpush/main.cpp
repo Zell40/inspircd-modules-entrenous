@@ -338,7 +338,7 @@ public:
 		StopPushWorker();
 		{
 			std::lock_guard<std::mutex> lock(vapid_mutex);
-			vapid = WebPush::VapidKeys();
+			vapid.Reset();
 			vapid_ready = false;
 		}
 		subs_loaded = false;
