@@ -809,8 +809,8 @@ public:
 		msg.PushParam(DeviceId(sub.endpoint));
 		msg.PushParam(host);
 		msg.PushParam(sub.nick.empty() ? "*" : sub.nick);
-		msg.PushParamConv(sub.updated);
-		msg.PushParamConv(sub.last_success);
+		msg.PushParam(ConvToStr(sub.updated));
+		msg.PushParam(ConvToStr(sub.last_success));
 		msg.PushParam(online ? "1" : "0");
 		msg.PushParam(shared ? "1" : "0");
 		ClientProtocol::Event ev(webpushev, msg);
