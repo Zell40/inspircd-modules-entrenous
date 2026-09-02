@@ -210,8 +210,8 @@ inline EVP_PKEY* EvpFromPrivateRaw(const unsigned char* priv, size_t privlen,
 			OSSL_PKEY_PARAM_PUB_KEY, const_cast<unsigned char*>(pub), publen);
 	params[n] = OSSL_PARAM_construct_end();
 
-	const int selection = pub ? EVP_PKEY_KEYPAIR : EVP_PKEY_PRIVATE_KEY;
-	if (EVP_PKEY_fromdata(ctx, &pkey, selection, params) <= 0)
+	// EVP_PKEY_KEYPAIR accepts private-only EC import (pub optional).
+	if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
 		pkey = nullptr;
 	EVP_PKEY_CTX_free(ctx);
 	return pkey;
