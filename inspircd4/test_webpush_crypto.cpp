@@ -107,7 +107,6 @@ int main()
 	ExpectHex("CEK", std::string(reinterpret_cast<char*>(cek), 16), want_cek);
 	ExpectHex("NONCE", std::string(reinterpret_cast<char*>(nonce), 12), want_nonce);
 
-	std::printf("… pubkey export\n");
 	std::string as_pub_probe;
 	if (!WebPush::EvpPublicUncompressed(as_key, as_pub_probe))
 	{
@@ -116,7 +115,6 @@ int main()
 	}
 	ExpectHex("as_public_export", as_pub_probe, as_public);
 
-	std::printf("… encrypt\n");
 	std::string body;
 	std::string as_pub_out;
 	if (!WebPush::EncryptAes128Gcm(plaintext, ua_public, auth_secret, body, &as_pub_out,
@@ -125,7 +123,6 @@ int main()
 		std::fprintf(stderr, "EncryptAes128Gcm failed: %s\n", WebPush::OpenSSLError().c_str());
 		return 1;
 	}
-	std::printf("… encrypt done\n");
 	ExpectHex("as_public", as_pub_out, as_public);
 	if (body.size() < 86)
 	{
