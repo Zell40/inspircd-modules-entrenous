@@ -305,7 +305,6 @@ public:
 			LoadSubscriptions();
 
 		SetInterval(saveperiod);
-		StartPushWorker();
 	}
 
 	void OnBuildISupport(ISupport::TokenMap& tokens) override
@@ -585,6 +584,7 @@ public:
 
 	void Enqueue(PushJob job)
 	{
+		StartPushWorker();
 		if (!worker)
 			return;
 		worker->LockQueue();
