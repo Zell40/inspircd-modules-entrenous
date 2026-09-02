@@ -241,6 +241,35 @@ inline bool EvpPublicUncompressed(EVP_PKEY* pkey, std::string& out)
 	return ok && out.size() == 65 && out[0] == '\x04';
 }
 
+/** If pkey has no exportable public octets (common for PEM with private EC only), rebuild from priv. */
+inline EVP_PKEY* EvpCompleteKeypair(EVP_PKEY* in)
+{
+	if (!in)
+		return nullptr;
+	std::string probe;
+	if (EvpPublicUncompressed(in, probe))
+		return in;
+
+	BIGNUM* bn = nullptr;
+	if (!EVP_PKEY_get_bn_param(in, OSSL_PKEY_PARAM_PRIV_KEY, &bn))
+	{
+		EVP_PKEY_free(in);
+		return nullptr;
+	}
+	unsigned char priv[32] = {};
+	const int len = BN_num_bytes(bn);
+	if (len <= 0 || len > 32)
+	{
+		BN_free(bn);
+		EVP_PKEY_free(in);
+		return nullptr;
+	}
+	BN_bn2bin(bn, priv + (32 - len));
+	BN_free(bn);
+	EVP_PKEY_free(in);
+	return EvpFromPrivateRaw(priv, 32, nullptr, 0);
+}
+
 inline bool EcdhX(EVP_PKEY* local, EVP_PKEY* peer, std::string& secret)
 {
 	if (!local || !peer)
@@ -408,6 +437,8 @@ inline bool DerEcdsaToRaw(const unsigned char* der, size_t derlen, unsigned char
 inline bool JwtEs256(EVP_PKEY* vapid, const std::string& aud, const std::string& sub,
 	time_t exp, std::string& jwt)
 {
+	if (!vapid)
+		return false;
 	const std::string header = R"({"typ":"JWT","alg":"ES256"})";
 	std::string payload = "{\"aud\":\"" + aud + "\",\"exp\":" + std::to_string(static_cast<long long>(exp))
 		+ ",\"sub\":\"" + sub + "\"}";
@@ -479,9 +510,14 @@ struct VapidKeys
 	bool SetFromPkey(EVP_PKEY* src)
 	{
 		EVP_PKEY_free(pkey);
-		pkey = src;
-		if (!src || !EvpPublicUncompressed(src, public_uncompressed))
+		pkey = nullptr;
+		EVP_PKEY* key = EvpCompleteKeypair(src);
+		if (!key || !EvpPublicUncompressed(key, public_uncompressed))
+		{
+			EVP_PKEY_free(key);
 			return false;
+		}
+		pkey = key;
 		public_b64url = B64Encode(public_uncompressed, B64URL, false);
 		return true;
 	}

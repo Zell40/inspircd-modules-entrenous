@@ -249,16 +249,22 @@ public:
 		SaveSubscriptions();
 	}
 
+	void StartPushWorker()
+	{
+		if (worker)
+			return;
+		OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
+		worker = new PushWorker(this);
+		worker->Start();
+	}
+
 	void init() override
 	{
-		OPENSSL_init_ssl(0, nullptr);
 		if (!ServerInstance->Modules.Find("cap"))
 		{
 			ServerInstance->Logs.Normal(MODNAME, "WARNING: the cap module is not loaded! "
 				"webpush will not be advertised until it is loaded.");
 		}
-		worker = new PushWorker(this);
-		worker->Start();
 	}
 
 	void ReadConfig(ConfigStatus& status) override
@@ -289,15 +295,17 @@ public:
 			if (!WebPush::LoadVapidPem(vapid, vapidfile))
 			{
 				if (!WebPush::GenerateVapid(vapid) || !WebPush::SaveVapidPem(vapid, vapidfile))
-					throw ModuleException(this, "Unable to load or create VAPID key file: " + vapidfile);
+					throw ModuleException(this, "Unable to load or create VAPID key file: " + vapidfile
+						+ " (check data directory permissions and OpenSSL EC support)");
 				ServerInstance->Logs.Normal(MODNAME, "Generated new VAPID key pair in {}", vapidfile);
 			}
 		}
 
-		if (status.initial)
+		if (status.initial || owners.empty())
 			LoadSubscriptions();
 
 		SetInterval(saveperiod);
+		StartPushWorker();
 	}
 
 	void OnBuildISupport(ISupport::TokenMap& tokens) override
@@ -1157,7 +1165,7 @@ void PushWorker::OnStart()
 			timeout = parent->http_timeout;
 			vapidpub = parent->vapid.public_b64url;
 			std::string origin = WebPush::OriginOf(job.endpoint);
-			prepared = !origin.empty()
+			prepared = parent->vapid.pkey && !origin.empty()
 				&& WebPush::EncryptAes128Gcm(job.plaintext, job.p256dh, job.auth, body)
 				&& WebPush::JwtEs256(parent->vapid.pkey, origin, contact,
 					time(nullptr) + 12 * 3600, jwt);
