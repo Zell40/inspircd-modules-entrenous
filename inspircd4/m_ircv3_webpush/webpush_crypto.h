@@ -22,6 +22,7 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
+#include <openssl/param_build.h>
 #include <openssl/params.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
@@ -207,43 +208,41 @@ inline EVP_PKEY* EvpFromPrivateRaw(const unsigned char* priv, size_t privlen,
 	if (privlen != 32)
 		return nullptr;
 
+	// EC priv must be a BN (not octet string) — see OpenSSL EVP_PKEY-EC / fromdata docs.
+	BIGNUM* priv_bn = BN_bin2bn(priv, static_cast<int>(privlen), nullptr);
+	if (!priv_bn)
+		return nullptr;
+
 	auto import = [&](const unsigned char* pubopt, size_t puboptlen) -> EVP_PKEY*
 	{
+		OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
+		if (!bld)
+			return nullptr;
+		bool built = OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, "prime256v1", 0)
+			&& OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, priv_bn);
+		if (built && pubopt && puboptlen)
+			built = OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pubopt, puboptlen);
+		OSSL_PARAM* params = built ? OSSL_PARAM_BLD_to_param(bld) : nullptr;
+		OSSL_PARAM_BLD_free(bld);
+		if (!params)
+			return nullptr;
+
 		EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
-		if (!ctx)
-			return nullptr;
-
 		EVP_PKEY* pkey = nullptr;
-		if (EVP_PKEY_fromdata_init(ctx) <= 0)
-		{
-			EVP_PKEY_CTX_free(ctx);
-			return nullptr;
-		}
-
-		OSSL_PARAM params[4];
-		params[0] = OSSL_PARAM_construct_utf8_string(
-			OSSL_PKEY_PARAM_GROUP_NAME, const_cast<char*>("prime256v1"), 0);
-		params[1] = OSSL_PARAM_construct_octet_string(
-			OSSL_PKEY_PARAM_PRIV_KEY, const_cast<unsigned char*>(priv), privlen);
-		int n = 2;
-		if (pubopt && puboptlen)
-			params[n++] = OSSL_PARAM_construct_octet_string(
-				OSSL_PKEY_PARAM_PUB_KEY, const_cast<unsigned char*>(pubopt), puboptlen);
-		params[n] = OSSL_PARAM_construct_end();
-
-		if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
-			pkey = nullptr;
+		if (ctx && EVP_PKEY_fromdata_init(ctx) > 0)
+			EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params);
 		EVP_PKEY_CTX_free(ctx);
+		OSSL_PARAM_free(params);
 		return pkey;
 	};
 
+	EVP_PKEY* pkey = nullptr;
 	if (pub && publen)
-	{
-		EVP_PKEY* pkey = import(pub, publen);
-		if (pkey)
-			return pkey;
-	}
-	return import(nullptr, 0);
+		pkey = import(pub, publen);
+	if (!pkey)
+		pkey = import(nullptr, 0);
+	BN_free(priv_bn);
+	return pkey;
 }
 
 inline bool EvpPublicUncompressed(EVP_PKEY* pkey, std::string& out)
