@@ -1,7 +1,7 @@
 /*
  * Web Push helpers for InspIRCd m_ircv3_webpush (RFC 8030, RFC 8188, RFC 8291, RFC 8292).
  *
- * OpenSSL 1.1.1+ / 3.x. No InspIRCd dependency — used by the module and the
+ * OpenSSL 1.1.1+ / 3.x (EVP_PKEY EC API). No InspIRCd dependency — used by the module and the
  * RFC 8291 vector test.
  */
 
@@ -16,16 +16,12 @@
 #include <string>
 #include <vector>
 
-#ifndef OPENSSL_SUPPRESS_DEPRECATED
-# define OPENSSL_SUPPRESS_DEPRECATED
-#endif
-
 #include <openssl/bn.h>
-#include <openssl/ec.h>
 #include <openssl/ecdsa.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
+#include <openssl/params.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
@@ -156,106 +152,106 @@ inline bool HkdfSha256(const unsigned char* salt, size_t saltlen,
 	return ok;
 }
 
-inline EC_KEY* EcKeyFromUncompressed(const unsigned char* pub, size_t publen)
+inline EVP_PKEY* EvpFromUncompressed(const unsigned char* pub, size_t publen)
 {
 	if (publen != 65 && publen != 33)
 		return nullptr;
-	EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-	if (!key)
+
+	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+	if (!ctx)
 		return nullptr;
-	const EC_GROUP* group = EC_KEY_get0_group(key);
-	EC_POINT* point = EC_POINT_new(group);
-	if (!point)
+
+	EVP_PKEY* pkey = nullptr;
+	if (EVP_PKEY_fromdata_init(ctx) <= 0)
 	{
-		EC_KEY_free(key);
+		EVP_PKEY_CTX_free(ctx);
 		return nullptr;
 	}
-	if (EC_POINT_oct2point(group, point, pub, publen, nullptr) != 1
-		|| EC_KEY_set_public_key(key, point) != 1)
-	{
-		EC_POINT_free(point);
-		EC_KEY_free(key);
-		return nullptr;
-	}
-	EC_POINT_free(point);
-	return key;
+
+	OSSL_PARAM params[3];
+	params[0] = OSSL_PARAM_construct_utf8_string(
+		OSSL_PKEY_PARAM_GROUP_NAME, const_cast<char*>("prime256v1"), 0);
+	params[1] = OSSL_PARAM_construct_octet_string(
+		OSSL_PKEY_PARAM_PUB_KEY, const_cast<unsigned char*>(pub), publen);
+	params[2] = OSSL_PARAM_construct_end();
+
+	if (EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) <= 0)
+		pkey = nullptr;
+	EVP_PKEY_CTX_free(ctx);
+	return pkey;
 }
 
-inline EC_KEY* EcKeyFromPrivateRaw(const unsigned char* priv, size_t privlen,
+inline EVP_PKEY* EvpFromPrivateRaw(const unsigned char* priv, size_t privlen,
 	const unsigned char* pub, size_t publen)
 {
 	if (privlen != 32)
 		return nullptr;
-	EC_KEY* key = pub ? EcKeyFromUncompressed(pub, publen) : EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-	if (!key)
+
+	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+	if (!ctx)
 		return nullptr;
-	BIGNUM* bn = BN_bin2bn(priv, static_cast<int>(privlen), nullptr);
-	if (!bn || EC_KEY_set_private_key(key, bn) != 1)
+
+	EVP_PKEY* pkey = nullptr;
+	if (EVP_PKEY_fromdata_init(ctx) <= 0)
 	{
-		BN_free(bn);
-		EC_KEY_free(key);
+		EVP_PKEY_CTX_free(ctx);
 		return nullptr;
 	}
-	BN_free(bn);
-	if (!pub)
-	{
-		const EC_GROUP* group = EC_KEY_get0_group(key);
-		EC_POINT* point = EC_POINT_new(group);
-		if (!point || EC_POINT_mul(group, point, EC_KEY_get0_private_key(key), nullptr, nullptr, nullptr) != 1
-			|| EC_KEY_set_public_key(key, point) != 1)
-		{
-			EC_POINT_free(point);
-			EC_KEY_free(key);
-			return nullptr;
-		}
-		EC_POINT_free(point);
-	}
-	return key;
+
+	OSSL_PARAM params[4];
+	params[0] = OSSL_PARAM_construct_utf8_string(
+		OSSL_PKEY_PARAM_GROUP_NAME, const_cast<char*>("prime256v1"), 0);
+	params[1] = OSSL_PARAM_construct_octet_string(
+		OSSL_PKEY_PARAM_PRIV_KEY, const_cast<unsigned char*>(priv), privlen);
+	int n = 2;
+	if (pub)
+		params[n++] = OSSL_PARAM_construct_octet_string(
+			OSSL_PKEY_PARAM_PUB_KEY, const_cast<unsigned char*>(pub), publen);
+	params[n] = OSSL_PARAM_construct_end();
+
+	const int selection = pub ? EVP_PKEY_KEYPAIR : EVP_PKEY_PRIVATE_KEY;
+	if (EVP_PKEY_fromdata(ctx, &pkey, selection, params) <= 0)
+		pkey = nullptr;
+	EVP_PKEY_CTX_free(ctx);
+	return pkey;
 }
 
-inline bool EcPublicUncompressed(EC_KEY* key, std::string& out)
+inline bool EvpPublicUncompressed(EVP_PKEY* pkey, std::string& out)
 {
-	const EC_GROUP* group = EC_KEY_get0_group(key);
-	const EC_POINT* point = EC_KEY_get0_public_key(key);
-	if (!group || !point)
+	if (!pkey)
 		return false;
-	unsigned char buf[65];
-	size_t n = EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED, buf, sizeof(buf), nullptr);
-	if (n != 65)
+	size_t publen = 0;
+	if (!EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, nullptr, 0, &publen))
 		return false;
-	out.assign(reinterpret_cast<char*>(buf), n);
-	return true;
+	out.resize(publen);
+	if (!EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY,
+		reinterpret_cast<unsigned char*>(&out[0]), publen, &publen))
+		return false;
+	out.resize(publen);
+	if (publen == 65)
+		return out[0] == '\x04';
+	if (publen != 33)
+		return false;
+	EVP_PKEY* full = EvpFromUncompressed(reinterpret_cast<const unsigned char*>(out.data()), publen);
+	if (!full)
+		return false;
+	bool ok = EvpPublicUncompressed(full, out);
+	EVP_PKEY_free(full);
+	return ok && out.size() == 65 && out[0] == '\x04';
 }
 
-inline bool EcdhX(EC_KEY* local, EC_KEY* peer, std::string& secret)
+inline bool EcdhX(EVP_PKEY* local, EVP_PKEY* peer, std::string& secret)
 {
-	EVP_PKEY* loc = EVP_PKEY_new();
-	EVP_PKEY* rem = EVP_PKEY_new();
-	if (!loc || !rem)
-	{
-		EVP_PKEY_free(loc);
-		EVP_PKEY_free(rem);
+	if (!local || !peer)
 		return false;
-	}
-	// Up-ref: EVP_PKEY_set1_EC_KEY increments the EC_KEY refcount.
-	if (EVP_PKEY_set1_EC_KEY(loc, local) != 1 || EVP_PKEY_set1_EC_KEY(rem, peer) != 1)
-	{
-		EVP_PKEY_free(loc);
-		EVP_PKEY_free(rem);
-		return false;
-	}
-	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(loc, nullptr);
+	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(local, nullptr);
 	bool ok = false;
 	size_t slen = 32;
 	secret.assign(32, '\0');
-	if (ctx && EVP_PKEY_derive_init(ctx) > 0 && EVP_PKEY_derive_set_peer(ctx, rem) > 0
+	if (ctx && EVP_PKEY_derive_init(ctx) > 0 && EVP_PKEY_derive_set_peer(ctx, peer) > 0
 		&& EVP_PKEY_derive(ctx, reinterpret_cast<unsigned char*>(&secret[0]), &slen) > 0 && slen == 32)
-	{
 		ok = true;
-	}
 	EVP_PKEY_CTX_free(ctx);
-	EVP_PKEY_free(loc);
-	EVP_PKEY_free(rem);
 	return ok;
 }
 
@@ -287,7 +283,7 @@ inline bool Aes128GcmEncrypt(const unsigned char* key, const unsigned char* nonc
 /** RFC 8291 aes128gcm body (header || ciphertext+tag). rs=4096, no extra padding. */
 inline bool EncryptAes128Gcm(const std::string& plaintext, const std::string& ua_public,
 	const std::string& auth_secret, std::string& body, std::string* as_public_out = nullptr,
-	const unsigned char* salt_override = nullptr, EC_KEY* as_key_override = nullptr)
+	const unsigned char* salt_override = nullptr, EVP_PKEY* as_key_override = nullptr)
 {
 	if (ua_public.size() != 65 || ua_public[0] != '\x04' || auth_secret.size() != 16)
 		return false;
@@ -298,49 +294,55 @@ inline bool EncryptAes128Gcm(const std::string& plaintext, const std::string& ua
 	else if (RAND_bytes(salt, 16) != 1)
 		return false;
 
-	EC_KEY* as_key = as_key_override;
+	EVP_PKEY* as_key = as_key_override;
 	bool owned = false;
 	if (!as_key)
 	{
-		as_key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-		if (!as_key || EC_KEY_generate_key(as_key) != 1)
+		EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+		if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0
+			|| EVP_PKEY_CTX_set_group_name(ctx, "prime256v1") <= 0)
 		{
-			EC_KEY_free(as_key);
+			EVP_PKEY_CTX_free(ctx);
 			return false;
 		}
+		if (EVP_PKEY_keygen(ctx, &as_key) <= 0)
+			as_key = nullptr;
+		EVP_PKEY_CTX_free(ctx);
+		if (!as_key)
+			return false;
 		owned = true;
 	}
 
 	std::string as_public;
-	if (!EcPublicUncompressed(as_key, as_public))
+	if (!EvpPublicUncompressed(as_key, as_public))
 	{
 		if (owned)
-			EC_KEY_free(as_key);
+			EVP_PKEY_free(as_key);
 		return false;
 	}
 	if (as_public_out)
 		*as_public_out = as_public;
 
-	EC_KEY* ua_key = EcKeyFromUncompressed(
+	EVP_PKEY* ua_key = EvpFromUncompressed(
 		reinterpret_cast<const unsigned char*>(ua_public.data()), ua_public.size());
 	if (!ua_key)
 	{
 		if (owned)
-			EC_KEY_free(as_key);
+			EVP_PKEY_free(as_key);
 		return false;
 	}
 
 	std::string ecdh;
 	if (!EcdhX(as_key, ua_key, ecdh))
 	{
-		EC_KEY_free(ua_key);
+		EVP_PKEY_free(ua_key);
 		if (owned)
-			EC_KEY_free(as_key);
+			EVP_PKEY_free(as_key);
 		return false;
 	}
-	EC_KEY_free(ua_key);
+	EVP_PKEY_free(ua_key);
 	if (owned)
-		EC_KEY_free(as_key);
+		EVP_PKEY_free(as_key);
 
 	std::string key_info = "WebPush: info";
 	key_info.push_back('\0');
@@ -386,19 +388,6 @@ inline bool EncryptAes128Gcm(const std::string& plaintext, const std::string& ua
 	body.append(as_public);
 	body.append(ciphertext);
 	return true;
-}
-
-inline EVP_PKEY* EvpFromEc(EC_KEY* ec)
-{
-	EVP_PKEY* pkey = EVP_PKEY_new();
-	if (!pkey)
-		return nullptr;
-	if (EVP_PKEY_set1_EC_KEY(pkey, ec) != 1)
-	{
-		EVP_PKEY_free(pkey);
-		return nullptr;
-	}
-	return pkey;
 }
 
 inline bool DerEcdsaToRaw(const unsigned char* der, size_t derlen, unsigned char rs[64])
@@ -486,11 +475,11 @@ struct VapidKeys
 		EVP_PKEY_free(pkey);
 	}
 
-	bool SetFromEc(EC_KEY* ec)
+	bool SetFromPkey(EVP_PKEY* pkey)
 	{
-		EVP_PKEY_free(pkey);
-		pkey = EvpFromEc(ec);
-		if (!pkey || !EcPublicUncompressed(ec, public_uncompressed))
+		EVP_PKEY_free(this->pkey);
+		this->pkey = pkey;
+		if (!pkey || !EvpPublicUncompressed(pkey, public_uncompressed))
 			return false;
 		public_b64url = B64Encode(public_uncompressed, B64URL, false);
 		return true;
@@ -499,14 +488,19 @@ struct VapidKeys
 
 inline bool GenerateVapid(VapidKeys& keys)
 {
-	EC_KEY* ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-	if (!ec || EC_KEY_generate_key(ec) != 1)
-	{
-		EC_KEY_free(ec);
+	EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+	if (!ctx)
 		return false;
-	}
-	bool ok = keys.SetFromEc(ec);
-	EC_KEY_free(ec);
+	EVP_PKEY* pkey = nullptr;
+	bool ok = EVP_PKEY_keygen_init(ctx) > 0
+		&& EVP_PKEY_CTX_set_group_name(ctx, "prime256v1") > 0
+		&& EVP_PKEY_keygen(ctx, &pkey) > 0;
+	EVP_PKEY_CTX_free(ctx);
+	if (!ok)
+		return false;
+	ok = keys.SetFromPkey(pkey);
+	if (!ok)
+		EVP_PKEY_free(pkey);
 	return ok;
 }
 
@@ -531,13 +525,7 @@ inline bool LoadVapidPem(VapidKeys& keys, const std::string& path)
 	BIO_free(bio);
 	if (!pkey)
 		return false;
-	EC_KEY* ec = EVP_PKEY_get1_EC_KEY(pkey);
-	EVP_PKEY_free(pkey);
-	if (!ec)
-		return false;
-	bool ok = keys.SetFromEc(ec);
-	EC_KEY_free(ec);
-	return ok;
+	return keys.SetFromPkey(pkey);
 }
 
 inline bool IsInternalSockaddr(const sockaddr* sa, socklen_t len)

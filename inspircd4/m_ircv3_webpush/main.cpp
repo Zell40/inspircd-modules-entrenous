@@ -712,14 +712,14 @@ public:
 			return false;
 		if (p256dh.size() == 33)
 		{
-			EC_KEY* key = WebPush::EcKeyFromUncompressed(
+			EVP_PKEY* key = WebPush::EvpFromUncompressed(
 				reinterpret_cast<const unsigned char*>(p256dh.data()), p256dh.size());
-			if (!key || !WebPush::EcPublicUncompressed(key, p256dh))
+			if (!key || !WebPush::EvpPublicUncompressed(key, p256dh))
 			{
-				EC_KEY_free(key);
+				EVP_PKEY_free(key);
 				return false;
 			}
-			EC_KEY_free(key);
+			EVP_PKEY_free(key);
 		}
 		return true;
 	}

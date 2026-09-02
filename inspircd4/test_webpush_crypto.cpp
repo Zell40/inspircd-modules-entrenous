@@ -53,7 +53,7 @@ int main()
 		return 1;
 	}
 
-	EC_KEY* as_key = WebPush::EcKeyFromPrivateRaw(
+	EVP_PKEY* as_key = WebPush::EvpFromPrivateRaw(
 		reinterpret_cast<const unsigned char*>(as_private.data()), as_private.size(),
 		reinterpret_cast<const unsigned char*>(as_public.data()), as_public.size());
 	if (!as_key)
@@ -61,7 +61,7 @@ int main()
 		std::fprintf(stderr, "failed to load as_key\n");
 		return 1;
 	}
-	EC_KEY* ua_key = WebPush::EcKeyFromUncompressed(
+	EVP_PKEY* ua_key = WebPush::EvpFromUncompressed(
 		reinterpret_cast<const unsigned char*>(ua_public.data()), ua_public.size());
 	if (!ua_key)
 	{
@@ -124,8 +124,8 @@ int main()
 	ExpectHex("ciphertext", body.substr(86), want_ct);
 	ExpectHex("full body", body, want_header + want_ct);
 
-	EC_KEY_free(as_key);
-	EC_KEY_free(ua_key);
+	EVP_PKEY_free(as_key);
+	EVP_PKEY_free(ua_key);
 
 	WebPush::VapidKeys vapid;
 	if (!WebPush::GenerateVapid(vapid) || vapid.public_uncompressed.size() != 65)
