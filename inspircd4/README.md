@@ -432,11 +432,13 @@ Les caps ne sont **pas** listées en CAP LS 301. Le client **doit** `CAP REQ soj
 ## Commandes
 
 ```
+WEBPUSH LIST
 WEBPUSH REGISTER <endpoint> p256dh=<b64url>;auth=<b64url>
-WEBPUSH UNREGISTER <endpoint>
+WEBPUSH UNREGISTER <endpoint|device-id>
 ```
 
 - Abonnements stockés par **compte** (`a:<compte>`) si `requireaccount=yes`, sinon par nick (`n:<nick>`).
+- `LIST` renvoie une ligne `WEBPUSH DEVICE <id> <host> <nick> <updated> <last_success> <online 0|1> <shared 0|1>` par appareil, puis `WEBPUSH END *`. `<id>` est un identifiant stable 16 hex (SHA-256 tronqué de l’endpoint) ; `UNREGISTER` accepte l’endpoint https complet **ou** cet id. `<shared>` vaut `1` si le même endpoint est enregistré pour un **autre** compte (sans révéler lequel).
 - `REGISTER` associe l’endpoint à la session courante (UUID) pour détecter si le « registrar » est encore en ligne.
 - Réponses serveur : `WEBPUSH REGISTER|UNREGISTER <endpoint>` (echo de confirmation).
 - Erreurs typiques : `NO_CAPABILITY`, `FORBIDDEN` (pas de compte), `INVALID_PARAMS` (URL non-https / clés invalides), `TOO_MANY` (plafond `maxsubscriptions`).

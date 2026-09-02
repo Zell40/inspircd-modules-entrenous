@@ -46,11 +46,34 @@
 #include <fstream>
 #include <mutex>
 
+#include <openssl/sha.h>
+
 #include "webpush_crypto.h"
 
 static constexpr const char* CAP_SOJU = "soju.im/webpush";
 static constexpr const char* CAP_DRAFT = "draft/webpush";
 static constexpr const char* PING_PAYLOAD = "PING webpush";
+
+/** Stable 16-hex id for an endpoint (WEBPUSH LIST / UNREGISTER by id). */
+static std::string DeviceId(const std::string& endpoint)
+{
+	unsigned char hash[SHA256_DIGEST_LENGTH];
+	SHA256(reinterpret_cast<const unsigned char*>(endpoint.data()), endpoint.size(), hash);
+	static const char hex[] = "0123456789abcdef";
+	std::string out;
+	out.reserve(16);
+	for (int i = 0; i < 8; ++i)
+	{
+		out.push_back(hex[hash[i] >> 4]);
+		out.push_back(hex[i] & 0x0f);
+	}
+	return out;
+}
+
+static bool LooksLikeDeviceId(const std::string& s)
+{
+	return s.size() == 16 && s.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
 
 struct Subscription final
 {
@@ -749,6 +772,100 @@ public:
 		return nullptr;
 	}
 
+	Subscription* FindSubByDeviceId(OwnerRecord& rec, const std::string& id)
+	{
+		for (auto& sub : rec.subs)
+		{
+			if (DeviceId(sub.endpoint) == id)
+				return &sub;
+		}
+		return nullptr;
+	}
+
+	bool IsEndpointShared(const std::string& endpoint, const std::string& owner) const
+	{
+		for (const auto& [o, rec] : owners)
+		{
+			if (irc::equals(o, owner))
+				continue;
+			for (const auto& sub : rec.subs)
+			{
+				if (sub.endpoint == endpoint)
+					return true;
+			}
+		}
+		return false;
+	}
+
+	void SendDeviceLine(LocalUser* user, const Subscription& sub, const std::string& owner)
+	{
+		std::string host, port, path;
+		if (!WebPush::ParseHttpsUrl(sub.endpoint, host, port, path))
+			host = "?";
+		const bool online = !sub.uuid.empty() && ServerInstance->Users.FindUUID(sub.uuid);
+		const bool shared = IsEndpointShared(sub.endpoint, owner);
+		ClientProtocol::Message msg("WEBPUSH", ServerInstance->Config->GetServerName());
+		msg.PushParam("DEVICE");
+		msg.PushParam(DeviceId(sub.endpoint));
+		msg.PushParam(host);
+		msg.PushParam(sub.nick.empty() ? "*" : sub.nick);
+		msg.PushParamConv(sub.updated);
+		msg.PushParamConv(sub.last_success);
+		msg.PushParam(online ? "1" : "0");
+		msg.PushParam(shared ? "1" : "0");
+		ClientProtocol::Event ev(webpushev, msg);
+		user->Send(ev);
+	}
+
+	CmdResult HandleList(LocalUser* user, const std::string& owner)
+	{
+		auto it = owners.find(owner);
+		if (it != owners.end())
+		{
+			for (const auto& sub : it->second.subs)
+				SendDeviceLine(user, sub, owner);
+		}
+		SendWebPushMsg(user, "END", "*");
+		return CmdResult::SUCCESS;
+	}
+
+	CmdResult HandleUnregister(LocalUser* user, const std::string& owner, const std::string& target)
+	{
+		std::string endpoint = target;
+		if (LooksLikeDeviceId(target))
+		{
+			auto it = owners.find(owner);
+			if (it == owners.end())
+			{
+				fail.Send(user, &cmd, "INVALID_PARAMS", "UNREGISTER", target,
+					"Unknown Web Push device");
+				return CmdResult::FAILURE;
+			}
+			Subscription* sub = FindSubByDeviceId(it->second, target);
+			if (!sub)
+			{
+				fail.Send(user, &cmd, "INVALID_PARAMS", "UNREGISTER", target,
+					"Unknown Web Push device");
+				return CmdResult::FAILURE;
+			}
+			endpoint = sub->endpoint;
+		}
+		else
+		{
+			std::string host, port, path;
+			if (!WebPush::ParseHttpsUrl(endpoint, host, port, path)
+				|| WebPush::HostIsInternalLiteral(host))
+			{
+				fail.Send(user, &cmd, "INVALID_PARAMS", "UNREGISTER", endpoint,
+					"Endpoint must be an https URL that does not target a private address");
+				return CmdResult::FAILURE;
+			}
+		}
+		RemoveEndpoint(owner, endpoint);
+		SendWebPushMsg(user, "UNREGISTER", endpoint);
+		return CmdResult::SUCCESS;
+	}
+
 	void LoadSubscriptions()
 	{
 		std::ifstream in(persistfile.c_str());
@@ -815,7 +932,7 @@ public:
 CommandWebPush::CommandWebPush(Module* Creator, ModuleWebPush& Mod, IRCv3::Replies::Fail& Fail,
 	IRCv3::Replies::Warn& Warn, IRCv3::Replies::Note& Note,
 	WebPushCap& CapSoju, WebPushCap& CapDraft)
-	: SplitCommand(Creator, "WEBPUSH", 2)
+	: SplitCommand(Creator, "WEBPUSH", 1)
 	, mod(Mod)
 	, fail(Fail)
 	, warn(Warn)
@@ -823,7 +940,7 @@ CommandWebPush::CommandWebPush(Module* Creator, ModuleWebPush& Mod, IRCv3::Repli
 	, cap_soju(CapSoju)
 	, cap_draft(CapDraft)
 {
-	syntax = { "{REGISTER|UNREGISTER} <endpoint> [<keys>]" };
+	syntax = { "{LIST|REGISTER|UNREGISTER} [<endpoint> [<keys>]]" };
 }
 
 CmdResult CommandWebPush::HandleLocal(LocalUser* user, const Params& parameters)
@@ -836,34 +953,42 @@ CmdResult CommandWebPush::HandleLocal(LocalUser* user, const Params& parameters)
 	}
 
 	const std::string& subcmd = parameters[0];
+
+	const std::string owner = mod.OwnerKey(user);
+	if (owner.empty())
+	{
+		fail.Send(user, this, "FORBIDDEN", subcmd, parameters.size() > 1 ? parameters[1] : "*",
+			"You must be logged into an account to use Web Push");
+		return CmdResult::FAILURE;
+	}
+
+	if (irc::equals(subcmd, "LIST"))
+		return mod.HandleList(user, owner);
+
+	if (parameters.size() < 2)
+	{
+		fail.Send(user, this, "INVALID_PARAMS", subcmd, "*",
+			"WEBPUSH REGISTER and UNREGISTER require an endpoint or device id");
+		return CmdResult::FAILURE;
+	}
+
 	const std::string& endpoint = parameters[1];
+
+	if (irc::equals(subcmd, "UNREGISTER"))
+		return mod.HandleUnregister(user, owner, endpoint);
+
+	if (!irc::equals(subcmd, "REGISTER"))
+	{
+		fail.Send(user, this, "INVALID_PARAMS", subcmd, endpoint, "Unknown WEBPUSH subcommand");
+		return CmdResult::FAILURE;
+	}
+
 	std::string host, port, path;
 	if (!WebPush::ParseHttpsUrl(endpoint, host, port, path)
 		|| WebPush::HostIsInternalLiteral(host))
 	{
 		fail.Send(user, this, "INVALID_PARAMS", subcmd, endpoint,
 			"Endpoint must be an https URL that does not target a private address");
-		return CmdResult::FAILURE;
-	}
-
-	const std::string owner = mod.OwnerKey(user);
-	if (owner.empty())
-	{
-		fail.Send(user, this, "FORBIDDEN", subcmd, endpoint,
-			"You must be logged into an account to use Web Push");
-		return CmdResult::FAILURE;
-	}
-
-	if (irc::equals(subcmd, "UNREGISTER"))
-	{
-		mod.RemoveEndpoint(owner, endpoint);
-		mod.SendWebPushMsg(user, "UNREGISTER", endpoint);
-		return CmdResult::SUCCESS;
-	}
-
-	if (!irc::equals(subcmd, "REGISTER"))
-	{
-		fail.Send(user, this, "INVALID_PARAMS", subcmd, endpoint, "Unknown WEBPUSH subcommand");
 		return CmdResult::FAILURE;
 	}
 
