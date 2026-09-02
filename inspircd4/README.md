@@ -369,7 +369,7 @@ Le module :
 - refuse les URL non-`https` et les adresses privées / loopback (protection SSRF, comme soju/Ergo) ;
 - envoie le payload comme **une ligne IRC** (tags `time`, `msgid`, `account` si présents) pour que le client puisse réinjecter l’événement.
 
-InspIRCd n’est pas un bouncer always-on : les highlights canal ne partent que si **une session du compte est encore connectée** (ou away). Les MP vers le dernier nick d’un compte déconnecté peuvent encore déclencher un push (`pushoffline`).
+InspIRCd n’est pas un bouncer always-on : un client **connecté et non-away** ne reçoit pas de Web Push (il a déjà le trafic IRC). Les push partent surtout si le destinataire est **away** (`pushaway`), ou via `pushoffline` pour les MP vers un nick hors ligne, ou si `pushalways=yes`.
 
 ## Installation
 
@@ -398,6 +398,8 @@ Dépendance de compilation : **OpenSSL** (`libssl-dev` / `openssl-dev`). Les cer
     pushaway="yes"
     pushoffline="yes"
     pushalways="no"
+    pushnotices="yes"
+    noticecooldown="10s"
     testonregister="yes"
     httptimeout="15s"
     maxperminute="30"
@@ -419,7 +421,9 @@ Au premier démarrage, une paire de clés VAPID est générée dans `vapidfile` 
 | `expiration` | 30d | Oublier un abonnement non renouvelé |
 | `pushaway` | yes | Push si le destinataire est away |
 | `pushoffline` | yes | Push des MP vers le dernier nick d’un compte offline |
-| `pushalways` | no | Push même si le client enregistré est encore connecté |
+| `pushalways` | no | Push même si le destinataire est connecté et non-away |
+| `pushnotices` | yes | Autoriser les push pour les `NOTICE` (sinon PRIVMSG/INVITE seulement) |
+| `noticecooldown` | 10s | Anti-rafale : au plus un push NOTICE par compte dans cette fenêtre (bots au JOIN, etc.) |
 | `testonregister` | yes | Envoie `PING webpush` pour valider l’endpoint |
 | `httptimeout` | 15s | Timeout du POST HTTPS |
 | `maxperminute` | 30 | Rate-limit de pushes par compte |
@@ -449,19 +453,26 @@ Un push n’est envoyé que si le destinataire a au moins un abonnement actif et
 
 | Événement | Urgence HTTP | Conditions |
 |---|---|---|
-| **PRIVMSG/NOTICE** privé | `high` | Destinataire local avec abonnements ; pas mute/block sur la cible |
-| **Highlight** canal (nick du membre ou son propre nick, frontières de mot) | `normal` | Membre local du canal ; pas `soju.im/muted` sur le salon |
-| **INVITE** | `high` | Invité local ; canal invité non en sourdine |
-| **MP offline** (`pushoffline`) | `high` | Nick inexistant mais dernier nick connu d’un compte abonné ; pas mute sur ce nick |
+| **PRIVMSG** privé | `high` | Destinataire local ; pas mute/block ; session à notifier |
+| **NOTICE** privé | `high` | Idem + `pushnotices=yes` + anti-rafale `noticecooldown` |
+| **Highlight** canal (nick du membre, frontières de mot) | `normal` | Membre local du canal ; pas `soju.im/muted` ; session à notifier |
+| **INVITE** | `high` | Invité local ; canal non en sourdine ; session à notifier |
+| **MP offline** (`pushoffline`) | `high` | Nick inexistant mais dernier nick connu d’un compte abonné |
+
+**Multi-pseudos / même compte :** les abonnements sont par compte, mais :
+
+1. une session **connectée et non-away** ne déclenche **pas** de Web Push (elle voit déjà le IRC) — donc Jessie qui JOIN et reçoit 5 NOTICE bots **n’envoie plus** ces notices sur le téléphone de Zell hors ligne ;
+2. seuls les endpoints dont la session « registrar » est **hors ligne** reçoivent le POST (pas l’appareil encore connecté).
+
+Les NOTICE de salon **sans** highlight de nick ne génèrent pas de push. Les CTCP (`ACTION` exceptée) non plus.
 
 **`ShouldNotifyUser`** (simplifié) :
 
 - `pushalways=yes` → toujours notifier ;
-- sinon, si **aucune** session « registrar » (UUID de l’endpoint) est encore connectée → notifier ;
-- sinon, si `pushaway=yes` et le destinataire est away → notifier ;
-- sinon → pas de push (client encore actif sur le réseau).
+- sinon, si le destinataire local est **away** et `pushaway=yes` → notifier (appareils idle seulement) ;
+- sinon (connecté, présent) → **pas** de push.
 
-Les CTCP (`ACTION` exceptée) ne génèrent pas de push.
+**Anti-rafale NOTICE :** après un push NOTICE pour un compte, les suivants sont ignorés pendant `noticecooldown` (défaut 10 s). Utile contre les bots qui envoient 4–5 notices au JOIN. Mettre `pushnotices="no"` pour couper tous les push NOTICE.
 
 ## Sourdine et blocage (`ircv3_metadata`)
 

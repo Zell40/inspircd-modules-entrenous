@@ -21,7 +21,7 @@
  */
 
 /// $ModAuthor: Entre Nous IRCv3 port
-/// $ModConfig: <webpush vapidfile="webpush-vapid.pem" contact="mailto:admin@example.net" requireaccount="yes" persistfile="webpush.db" maxsubscriptions="5" ttl="86400" expiration="30d" pushaway="yes" pushoffline="yes" pushalways="no" testonregister="yes" httptimeout="15s">
+/// $ModConfig: <webpush vapidfile="webpush-vapid.pem" contact="mailto:admin@example.net" requireaccount="yes" persistfile="webpush.db" maxsubscriptions="5" ttl="86400" expiration="30d" pushaway="yes" pushoffline="yes" pushalways="no" pushnotices="yes" noticecooldown="10s" testonregister="yes" httptimeout="15s">
 /// $ModDesc: Provides IRCv3 soju.im/webpush and draft/webpush (Web Push notifications).
 /// $ModDepends: core 4
 /// $CompilerFlags: find_compiler_flags("openssl" "")
@@ -222,12 +222,15 @@ public:
 	bool pushaway = true;
 	bool pushoffline = true;
 	bool pushalways = false;
+	bool pushnotices = true;
 	bool testonregister = true;
 	size_t maxsubscriptions = 5;
 	time_t expiration = 30 * 24 * 3600;
 	unsigned long saveperiod = 30;
+	time_t notice_cooldown = 10;
 
 	std::map<std::string, std::pair<time_t, unsigned int>> push_window;
+	std::map<std::string, time_t, irc::insensitive_swo> last_notice_push;
 	unsigned int max_per_minute = 30;
 
 	ModuleWebPush()
@@ -319,12 +322,14 @@ public:
 		pushaway = tag->getBool("pushaway", true);
 		pushoffline = tag->getBool("pushoffline", true);
 		pushalways = tag->getBool("pushalways", false);
+		pushnotices = tag->getBool("pushnotices", true);
 		testonregister = tag->getBool("testonregister", true);
 		maxsubscriptions = tag->getNum<size_t>("maxsubscriptions", 5, 1, 50);
 		ttl = static_cast<int>(tag->getDuration("ttl", 86400, 0, 7 * 24 * 3600));
 		http_timeout = static_cast<int>(tag->getDuration("httptimeout", 15, 3, 60));
 		expiration = static_cast<time_t>(tag->getDuration("expiration", 30 * 24 * 3600, 3600, 365 * 24 * 3600UL));
 		saveperiod = tag->getDuration("saveperiod", 30, 5, 3600);
+		notice_cooldown = static_cast<time_t>(tag->getDuration("noticecooldown", 10, 0, 3600));
 		max_per_minute = tag->getNum<unsigned int>("maxperminute", 30, 1, 600);
 		contact = tag->getString("contact");
 		if (contact.empty())
@@ -424,6 +429,9 @@ public:
 		if (IsCTCPText(parameters[1], ctcpname) && !irc::equals(ctcpname, "ACTION"))
 			return MOD_RES_PASSTHRU;
 
+		if (!pushnotices && irc::equals(command, "NOTICE"))
+			return MOD_RES_PASSTHRU;
+
 		if (IsTargetMutedForOwner(ownerit->first, target))
 			return MOD_RES_PASSTHRU;
 
@@ -438,6 +446,9 @@ public:
 			return;
 
 		const std::string command = (details.type == MessageType::NOTICE) ? "NOTICE" : "PRIVMSG";
+		if (!pushnotices && details.type == MessageType::NOTICE)
+			return;
+
 		if (target.type == MessageTarget::TYPE_USER)
 		{
 			User* dest = target.Get<User>();
@@ -601,24 +612,27 @@ public:
 		return false;
 	}
 
+	bool EndpointIsIdle(const Subscription& sub) const
+	{
+		if (sub.uuid.empty())
+			return true;
+		return ServerInstance->Users.FindUUID(sub.uuid) == nullptr;
+	}
+
+	/**
+	 * Push only when this local session is not actively reading IRC.
+	 * Connected + not away → no push (avoids flooding another nick/device on the
+	 * same account with JOIN notices / channel traffic the online session already sees).
+	 * Away + pushaway, or pushalways → push to idle endpoints only.
+	 */
 	bool ShouldNotifyUser(LocalUser* user, const OwnerRecord& rec, bool direct)
 	{
+		(void)rec;
 		(void)direct;
 		if (pushalways)
 			return true;
-		bool registrar_online = false;
-		for (const auto& sub : rec.subs)
-		{
-			if (!sub.uuid.empty() && ServerInstance->Users.FindUUID(sub.uuid))
-			{
-				registrar_online = true;
-				break;
-			}
-		}
-		if (!registrar_online)
-			return true;
-		if (pushaway && user->IsAway())
-			return true;
+		if (user->IsAway())
+			return pushaway;
 		return false;
 	}
 
@@ -634,6 +648,19 @@ public:
 		if (w.second >= max_per_minute)
 			return false;
 		++w.second;
+		return true;
+	}
+
+	/** Suppress NOTICE bursts (bots greeting on JOIN, etc.). */
+	bool NoticeCooldownOk(const std::string& owner)
+	{
+		if (notice_cooldown <= 0)
+			return true;
+		time_t now = ServerInstance->Time();
+		auto it = last_notice_push.find(owner);
+		if (it != last_notice_push.end() && now - it->second < notice_cooldown)
+			return false;
+		last_notice_push[owner] = now;
 		return true;
 	}
 
@@ -660,6 +687,8 @@ public:
 	{
 		if (!force && !RateLimitOk(owner))
 			return;
+		if (irc::equals(command, "NOTICE") && !NoticeCooldownOk(owner))
+			return;
 
 		std::string msgid;
 		std::string account;
@@ -684,6 +713,11 @@ public:
 		for (auto& sub : rec.subs)
 		{
 			if (expiration && now - sub.updated > expiration)
+				continue;
+			// Never notify an endpoint whose registrar session is still connected —
+			// that device already has the IRC traffic. Prevents cross-nick leaks on
+			// a shared account (online Jessie in #chan → offline Zell's phone).
+			if (!force && !EndpointIsIdle(sub))
 				continue;
 			PushJob job;
 			job.kind = PushJobKind::Notify;
