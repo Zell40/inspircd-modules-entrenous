@@ -15,6 +15,7 @@ Ce dépôt n’est pas un fork d’InspIRCd : chaque module se copie dans `src/m
 | [`inspircd4/m_ircv3_chathistory.cpp`](inspircd4/m_ircv3_chathistory.cpp) | Caps IRCv3 `draft/chathistory` + `draft/event-playback` (`CHATHISTORY`, dont `CLEAR`) |
 | [`inspircd4/m_ircv3_read_marker.cpp`](inspircd4/m_ircv3_read_marker.cpp) | Cap IRCv3 `draft/read-marker` (`MARKREAD`) |
 | [`inspircd4/m_ircv3_multiline.cpp`](inspircd4/m_ircv3_multiline.cpp) | Cap IRCv3 `draft/multiline` (messages multi-lignes en batch) |
+| [`inspircd4/m_securitygroups.cpp`](inspircd4/m_securitygroups.cpp) | Groupes de sécurité style Unreal (`SECURITYGROUPS`, extban `~g`, WHOIS) |
 | [`anope/ns_ircv3_register.cpp`](anope/ns_ircv3_register.cpp) | Squelette Anope 2 pour `ENCAP ACCREG` (expérimental) |
 
 Aide `/HELP` : [`inspircd4/help-entrenous.example.conf`](inspircd4/help-entrenous.example.conf)  

@@ -520,3 +520,33 @@ g++ -O2 -o test_webpush_crypto test_webpush_crypto.cpp -lcrypto
 - OpenSSL (libcrypto + libssl)
 - Client Web Push : **Orbit** (web) ou Goguma (mobile)
 
+# m_securitygroups
+
+Groupes de sécurité style UnrealIRCd (`/SECURITYGROUPS`, extban `~g` / `securitygroup`, ligne WHOIS).
+
+## Installation
+
+Copier `m_securitygroups.cpp` dans `src/modules/` de ton arbre InspIRCd 4, puis recompiler.
+
+```
+<module name="securitygroups">
+```
+
+## Configuration
+
+```
+# WHOIS (dont profil Orbit) : uniquement les groupes public="yes"
+# La liste complète reste visible via /SECURITYGROUPS (soi-même ou users/auspex)
+<securitygroups whoispubliconly="yes">
+
+<securitygroup name="tls" tls="yes" public="yes">
+<securitygroup name="regulier" account="yes" public="yes">
+<securitygroup name="websocket" websocket="yes" public="no">
+```
+
+| Option (`<securitygroups>`) | Défaut | Effet |
+|---|---|---|
+| `whoispubliconly` | `no` | Si `yes`, `/WHOIS` n’affiche que les groupes `public="yes"` (même en auto-WHOIS / auspex) |
+
+`/SECURITYGROUPS [nick]` continue d’afficher tous les groupes pour soi-même et les opers avec `users/auspex`.
+
